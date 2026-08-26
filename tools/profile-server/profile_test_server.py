@@ -445,7 +445,8 @@ def db_query(sql, args=None):
 def get_friends_for_account(accid):
     """Return friend list for an account with online status.
 
-    Returns list of dicts: {accid, nickname, login, charname, online}
+    Returns list of dicts: {accid, nickname, login, charname, online}.
+    charname is blank unless the friend is in the world.
 
     **`nickname` is what /flist displays, and `login` must NEVER be sent to
     another player.**
@@ -498,12 +499,8 @@ def get_friends_for_account(accid):
             charname = sess['charname'] or ''
             online = True
         else:
-            # Offline: get nickname or first character name
-            chars = db_query(
-                "SELECT charname FROM chars WHERE accid = %s LIMIT 1",
-                (tid,)
-            )
-            charname = chars[0]['charname'] if chars else f['nickname']
+            # Offline friends expose NO character name -- only the account nickname.
+            charname = ''
             online = False
 
         entry = {

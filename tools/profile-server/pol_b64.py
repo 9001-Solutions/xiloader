@@ -151,13 +151,20 @@ def build_status_notice_rich(friend_index, online, ident_lo, charname,
     blob = bytearray(104)
     for j in range(25):
         _s.pack_into('<H', blob, j * 2, 0x0100 if j == 22 else 0x0101)
-    if zone_id:
-        _s.pack_into('<H', blob, 0x14, (zone_id & 0x3FFF) | 0x4000)
+    # Zone 0 means "not in the world" (offline / character select) and must be
+    # written as 0, NOT left as the 0x0101 filler -- the filler reads back as
+    # zone 257 and renders as a real, wrong zone.
+    _s.pack_into('<H', blob, 0x14,
+                 ((zone_id & 0x3FFF) | 0x4000) if zone_id else 0)
     blk += blob
 
     # 0x40: 23-byte display name -> status table +0x04
     dn = bytearray(24)
-    d = (dispname or charname).encode('ascii', 'replace')[:23]
+    # `dispname or charname` was wrong: an intentionally BLANK display name
+    # (offline / character select) is falsy and fell back to charname, which
+    # callers pass as the nickname -- so "no character" rendered as the
+    # nickname. Only None means "not supplied".
+    d = (charname if dispname is None else dispname).encode('ascii', 'replace')[:23]
     dn[0:len(d)] = d
     blk += dn
 

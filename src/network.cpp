@@ -32,7 +32,12 @@ This file is part of DarkStar-server source code.
 #include "helpers.h"
 #include "command_handler.h"
 
-/* Externals */
+#include "friend.h"
+
+/* Set when FFXiDataComm sends the key (case 0x0002/0x0015) — marks initial
+ * lobby exchange complete. */
+static volatile bool g_LobbyKeyDone = false;
+
 namespace globals
 {
     extern std::string            g_ServerAddress;
@@ -51,12 +56,11 @@ namespace globals
     extern bool                   g_FirstLogin;
     extern std::string            g_TrustToken;
     extern bool                   g_TrustThisComputer;
+    extern bool                   g_EnableFriends;
 }
 
-// mbed tls state
 namespace sslState
 {
-
     extern mbedtls_net_context               server_fd;
     extern mbedtls_entropy_context           entropy;
     extern mbedtls_ctr_drbg_context          ctr_drbg;
@@ -630,6 +634,7 @@ namespace xiloader
                 memcpy(sendBuffer, (char*)"\xA2\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x58\xE0\x5D\xAD\x00\x00\x00\x00", 25);
 
                 xiloader::console::output(xiloader::color::warning, "Sending key..");
+                g_LobbyKeyDone = true;
                 sendSize = 28;
                 break;
 
@@ -683,6 +688,7 @@ namespace xiloader
     DWORD __stdcall network::PolDataComm(LPVOID lpParam)
     {
         SOCKET client = *(SOCKET*)lpParam;
+        delete (SOCKET*)lpParam;
         unsigned char recvBuffer[1024] = { 0 };
         int result = 0, x = 0;
         time_t t = 0;
@@ -736,6 +742,12 @@ namespace xiloader
 
         } while (result > 0);
 
+        /* Activate friend sockaddr only after the initial key exchange
+         * (g_LobbyKeyDone) — so activation fires after character selection,
+         * not on the first lobby exchange. */
+        if (x >= 3 && g_LobbyKeyDone && globals::g_EnableFriends)
+            friend_system::activate();
+
         /* Shutdown the client socket.. */
         if (shutdown(client, SD_SEND) == SOCKET_ERROR)
             xiloader::console::output(xiloader::color::error, "Client shutdown failed: %d", WSAGetLastError());
@@ -785,8 +797,10 @@ namespace xiloader
                 return 1;
             }
 
-            /* Start data communication for this client.. */
-            CreateThread(NULL, 0, xiloader::network::PolDataComm, &client, 0, NULL);
+            /* Heap-allocate so each thread owns its socket; passing &client
+             * would race with the next accept() iteration. */
+            SOCKET* pClient = new SOCKET(client);
+            CreateThread(NULL, 0, xiloader::network::PolDataComm, pClient, 0, NULL);
         }
 
         closesocket(sock);

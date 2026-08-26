@@ -29,6 +29,7 @@ namespace globals
     extern std::string            g_Password;
     extern std::string            g_OtpCode;
     extern char                   g_SessionHash[16];
+    extern uint32_t               g_AccountId;
     extern std::string            g_Email;
     extern std::array<uint8_t, 3> g_VersionNumber;
     extern uint16_t               g_ServerPort;
@@ -63,6 +64,7 @@ bool handleLoginCommand(int8_t command, json& login_reply_json, uint32_t& accoun
             if (maybeAccountId.has_value())
             {
                 accountId = maybeAccountId.value();
+                globals::g_AccountId = accountId;
             }
             else
             {

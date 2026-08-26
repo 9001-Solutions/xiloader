@@ -38,11 +38,14 @@ add_executable(xiloader
     src/defines.h
     src/FFXi.h
     src/FFXiMain.h
+    src/friend.cpp
+    src/friend.h
     src/functions.cpp
     src/functions.h
     src/main.cpp
     src/menus.h
     src/network.cpp
+    src/profile_proxy.cpp
     src/network.h
     src/polcore.h
     src/trust_token.cpp

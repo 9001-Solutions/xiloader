@@ -27,6 +27,7 @@ Mask extraction: mask[0:12] = Auth[0:12] XOR Init[0:12]
 import select
 import socket
 import struct
+import zlib
 import sys
 import os
 import time
@@ -356,18 +357,30 @@ def build_status_update_record(accid: int, online: bool, zone_id: int,
     return bytes(raw)
 
 
-def build_msgrec_response_body(records_48b: list, session_token_8b: bytes) -> bytes:
+def build_msgrec_response_body(records_48b: list, session_token_8b: bytes,
+                               bodies=None) -> bytes:
     """Returns the 0x108-per-record body (after the 8B size header).
+
     Layout: 8B initial pad + per-record [0x60 b64][0xA8 pad] (last record's
-    pad is 0xA0). Caller appends 4B sum-of-dwords trailer."""
-    body = bytearray(b'\x00' * 8)  # initial padding before first record
+    pad is 0xA0). Caller appends 4B sum-of-dwords trailer.
+
+    `bodies` supplies the message text per record, written into the pad that
+    follows it. polcore writes the received message file at NOTIFICATION time
+    and does not re-fetch it when the user opens it, so a body not delivered
+    here renders as polcore placeholder text (the subject plus the
+    RECIPIENT's own charname) and cannot be corrected afterwards.
+    """
+    body = bytearray(bytes(8))  # initial padding before first record
     n = len(records_48b)
     for i, rec in enumerate(records_48b):
         wire = build_msgrec_record_wire(rec, session_token_8b)
         if len(wire) != 0x60:
             raise RuntimeError(f"encoded record is {len(wire)}B, expected 0x60")
         body += wire
-        body += b'\x00' * (0xA8 if i < n - 1 else 0xA0)
+        # NOTE: the per-record pad is NOT the message-body channel. Writing the
+        # text here was tried and the client still rendered polcore's
+        # placeholder, so the pad stays zeroed.
+        body += bytes(0xA8 if i < n - 1 else 0xA0)
     return bytes(body)
 
 
@@ -383,39 +396,25 @@ def msgrec_trailer(size_header_8b: bytes, body: bytes) -> bytes:
         crc = (crc + struct.unpack_from('<I', crc_data, j)[0]) & 0xFFFFFFFF
     return struct.pack('<I', crc)
 
-# LSBN bypass -- invented bulk-poll protocol; tech debt to remove once polcore's
-# native NotificationResponse path is implemented. Per-msg block is 168 bytes.
-LSBN_MSG_SIZE = 168
+# Body-continuation records: entry[0x19..0x3D] carries the text, so 37 bytes
+# per record. 0x3E/0x3F must stay the 0x0880 flag word.
+MSGREC_CHUNK = 0x25
+MSGREC_TYPE_BODY_CHUNK = 0xFE
 
 
-def _build_lsbn_msg_block(nm):
-    """Pack one notification message into LSBN_MSG_SIZE bytes."""
-    blk = bytearray(LSBN_MSG_SIZE)
-    struct.pack_into('<I', blk, 0, nm['from_accid'])
-    packed = (nm['msg_type'] & 0xFF) | ((nm.get('msg_id', 0) & 0xFFFFFF) << 8)
-    struct.pack_into('<I', blk, 4, packed)
-    sn = nm['sender'].encode('ascii', errors='replace')[:15]
-    blk[8:8 + len(sn)] = sn
-    sb = nm['subject'].encode('ascii', errors='replace')[:15]
-    blk[24:24 + len(sb)] = sb
-    bd = nm['body'].encode('ascii', errors='replace')[:127]
-    blk[40:40 + len(bd)] = bd
-    return blk
+def msgrec_record_count(pending, unread):
+    """Total msgrec entries for an account: one per item plus its body chunks.
 
-
-def _build_lsbn_response(notif_messages, max_msgs=255):
-    """Pack a complete LSBN response: 8B header + N * LSBN_MSG_SIZE.
-
-    max_msgs caps at 255 because the wire format stores the count in one byte.
+    NotifPickup announces this, and xiloader configures polcore's SM with it.
+    Announcing only the item count makes the SM expect too few records and the
+    transfer never completes.
     """
-    msg_count = min(len(notif_messages), max_msgs)
-    resp = bytearray(8 + msg_count * LSBN_MSG_SIZE)
-    struct.pack_into('<I', resp, 0, 0x4C53424E)  # 'LSBN'
-    resp[4] = msg_count
-    for i, nm in enumerate(notif_messages[:msg_count]):
-        off = 8 + i * LSBN_MSG_SIZE
-        resp[off:off + LSBN_MSG_SIZE] = _build_lsbn_msg_block(nm)
-    return resp, msg_count
+    total = len(pending)
+    for u in unread:
+        text = (u.get('body') or '')
+        total += 1 + (len(text.encode('ascii', 'replace')) + MSGREC_CHUNK - 1) // MSGREC_CHUNK
+    return total
+
 
 # Protocol markers
 TYPE_MARKER = 0x81  # Type byte in ACK and AuthConfirm headers
@@ -560,8 +559,154 @@ def create_friend_request(from_accid, to_accid, nickname, charname_from):
     log(f"  DB: friend request created {from_accid} -> {to_accid} nick='{nickname}' from='{charname_from}'")
     # NOTE: do NOT also insert an account_friend_messages row. The pending
     # request in account_friend_requests is the single source of truth -- the
-    # LSBN handler synthesizes the inbox notification from there. Dual-writing
+    # notification path synthesizes the inbox entry from there. Dual-writing
     # surfaced two FWT entries per request in the inbox.
+
+
+def recipient_from_msg_filename(payload, session_token_8b, sender_accid=None):
+    """Recover the recipient account id from an uploaded message reference.
+
+    The upload payload is "O/m/" followed by the 96-char encoded filename of
+    the message the client just wrote to its own sent folder. That filename
+    decodes to the usual 72-byte record, and block1 (bytes 8..15) carries the
+    RECIPIENT account id XOR'd with KEY ^ IV.
+
+    IV is tried from the session token and as zero (observed files decode with
+    IV 0). A candidate is accepted only if it names a real account, so a wrong
+    guess yields None instead of a misfiled message.
+    """
+    from pol_b64 import decode as b64_decode
+    from pol_filename_iv import derive_iv, XOR_MAGIC_LO
+    text = payload.split(bytes(1))[0]
+    if len(text) < 100 or not text.startswith(b"O/m/"):
+        return None
+    try:
+        raw = b64_decode(text[4:100].decode("ascii"))
+    except Exception:
+        return None
+    if len(raw) < 16:
+        return None
+    block1_lo = struct.unpack_from("<I", raw, 8)[0]
+    ivs = [0]
+    try:
+        ivs.insert(0, derive_iv(session_token_8b)[0])
+    except Exception:
+        pass
+    # Validate against the SENDER'S FRIEND LIST, not merely "is an account".
+    # Several IVs can each yield a real account id -- one observed candidate was
+    # a valid but completely unrelated account -- so existence alone is not
+    # evidence. FFXi resolves the target from the friend list before polcore
+    # ever sees it, so a recipient that is not a friend of the sender is wrong.
+    for iv_lo in ivs:
+        accid = (block1_lo ^ XOR_MAGIC_LO ^ iv_lo) & 0xFFFFFFFF
+        if not accid:
+            continue
+        if sender_accid is not None:
+            if db_query("SELECT 1 FROM account_friends "
+                        "WHERE accid_owner = %s AND accid_target = %s",
+                        (sender_accid, accid)):
+                return accid
+        elif db_query("SELECT 1 FROM accounts WHERE id = %s", (accid,)):
+            return accid
+    return None
+
+
+def ashita_root():
+    """Ashita install dir that holds the msg tree.
+
+    Resolution order: ASHITA_ROOT, then the bootloader location recorded in
+    ASHITA_BOOTLOADER, then the cwd. Must NOT raise -- this runs inside a
+    connection handler, and an exception there kills the client's connection
+    mid-transfer rather than failing the one lookup.
+    """
+    root = os.environ.get('ASHITA_ROOT')
+    if root:
+        return root
+    boot = os.environ.get('ASHITA_BOOTLOADER')
+    if boot:
+        return os.path.dirname(os.path.dirname(boot))
+    return os.getcwd()
+
+
+def session_salt_for_account(accid):
+    """Current login's session_key, hex. Empty when the account is offline."""
+    rows = db_query("SELECT session_key FROM accounts_sessions WHERE accid = %s LIMIT 1",
+                    (accid,))
+    if not rows:
+        return ''
+    key = rows[0].get('session_key') or b''
+    return key.hex() if isinstance(key, (bytes, bytearray)) else str(key)
+
+
+def parse_compose_payload(buf):
+    """Split polcore's outgoing message payload into (subject, body).
+
+    Format built by polcore+0x1A8E0: subject <0x07> body <0x00> [blob].
+    FFXi's builder caps subject at 50 and body at 300 (FFXi+0x0F2F80), well
+    under polcore's own 128/4095 limits -- anything longer than the client can
+    produce is not from a legitimate compose.
+
+    Returns None when the buffer is not a compose payload (e.g. a body-fetch
+    request, which carries a 96-char encoded filename and no separator).
+    """
+    sep = buf.find(bytes([7]))
+    if sep < 0 or sep > 128:
+        return None
+    subject = buf[:sep]
+    rest = buf[sep + 1:]
+    end = rest.find(bytes([0]))
+    body = rest if end < 0 else rest[:end]
+    try:
+        subject_s = subject.decode('ascii')
+        body_s = body.decode('ascii')
+    except UnicodeDecodeError:
+        return None
+    # Both halves must be printable. Without this, arbitrary binary that
+    # happens to contain a 0x07 byte is mistaken for a composed message --
+    # every byte below 0x80 decodes as ASCII, so decoding alone proves nothing.
+    printable = lambda t: all(0x20 <= ord(c) <= 0x7E for c in t)
+    if not printable(subject_s) or not printable(body_s):
+        return None
+    if not subject_s and not body_s:
+        return None
+    return subject_s[:50], body_s[:300]
+
+
+def accid_from_identity(identity_lo, session_token_8b):
+    """Recover an account id from polcore's hashed identity.
+
+    polcore stores identity as (iv_lo ^ accid, iv_hi) -- FUN_10019D40 is a XOR
+    with the session-derived IV, so it inverts with the same XOR.
+    """
+    from pol_filename_iv import derive_iv
+    iv_lo, _ = derive_iv(session_token_8b)
+    return (iv_lo ^ identity_lo) & 0xFFFFFFFF
+
+
+def request_notification_id(accid_from, accid_to, created_at, session_salt=''):
+    """Non-zero notification id for a pending friend request.
+
+    account_friend_requests has no id column, so a naive row.get('id', 0) gave
+    0 -- and polcore drops a zero-token record, so the request never reached
+    the inbox at all.
+
+    Stable WITHIN a login, different ACROSS logins. Both halves matter:
+
+      stable  -- the same pending request is re-sent on every poll, and the id
+                 is the accept correlator (BefriendExtra+0x14). A changing id
+                 would look like a new notification every few seconds and would
+                 break accept matching.
+      per-login -- the inbox enumerates only msg/<accid>/r/b/. Once a message is
+                 marked read it moves to r/a/ and is gone from the inbox for
+                 good, while polcore's in-memory dedupe blocks redelivery under
+                 the same token. Without a new id per login, a request that was
+                 read but not accepted would be invisible forever while still
+                 pending in the DB. Salting with the login's session_key makes
+                 it reappear on the next login.
+    """
+    stamp = int(created_at.timestamp()) if hasattr(created_at, 'timestamp') else int(created_at or 0)
+    key = f"{accid_from}:{accid_to}:{stamp}:{session_salt}".encode('ascii')
+    return (zlib.crc32(key) & 0x7FFFFFFF) or 1
 
 
 def get_pending_requests_for_account(accid):
@@ -831,13 +976,6 @@ class FriendConnection:
             # If not, first 20B are credential header and we need 20 more for Init.
             first = self._recv_raw(40)
             if not first:
-                return
-
-            # LSBN direct notification query (first 4 bytes = 'LSBN' magic)
-            if len(first) >= 8 and first[0:4] == b'LSBN':
-                accid = struct.unpack_from('<I', first, 4)[0]
-                log(f"  LSBN direct query for accid={accid}", self.conn_id)
-                self.handle_lsbn_query(accid)
                 return
 
             # ACPT direct accept request: 'ACPT' + acceptor_accid (4B) +
@@ -1524,97 +1662,141 @@ class FriendConnection:
         extra_decoded = self.decode_header(extra)
         log(f"  BefriendExtra ({len(extra)}B) decoded header: {extra_decoded.hex()}", self.conn_id)
 
-        is_accept = (len(extra) == BEFRIEND_EXTRA_168)
+        # Packet SHAPE does not identify the flow. An initiator /befriend was
+        # captured sending a 168B Extra AND an 8B Finalize -- the same shape the
+        # accept flow uses -- so keying on length classified a brand-new request
+        # as an acceptance and no request row was ever written. Length is used
+        # only for FRAMING (whether to consume a Finalize); the accept-vs-create
+        # decision is made from server state further down.
+        has_finalize = (len(extra) == BEFRIEND_EXTRA_168)
 
-        if is_accept:
-            # Target accept flow -- wait for Finalize (8B)
+        # Candidate 32-bit fields in the Extra, logged so the account-id offset
+        # can be pinned from a capture once the search server sends a real one.
+        cand = {off: struct.unpack_from('<I', extra, off)[0]
+                for off in (0x00, 0x04, 0x08, 0x0C, 0x10, 0x14)
+                if off + 4 <= len(extra)}
+        log("  BefriendExtra dwords: " +
+            " ".join(f"+0x{o:02X}={v}" for o, v in cand.items()), self.conn_id)
+
+        if has_finalize:
+            # Consume the trailing Finalize so the stream stays framed.
             finalize = self.recv_any("BefriendFinalize")
             if finalize:
                 finalize = self.bf_decrypt(finalize)
                 if len(finalize) == FINALIZE_8B:
                     log(f"  BefriendFinalize (8B): {finalize.hex()}", self.conn_id)
 
-            # Process accept: create bidirectional friendship.
-            # The 304B BefriendRequest is all-zero on accept (polcore doesn't
-            # populate it for the accept-side), so the requester accid lives
-            # in the 168B BefriendExtra at [16..19] (LE uint32) -- polcore puts
-            # it there along with the requester charname at [24..38]. The
-            # acceptor's nickname-for-sender goes in our convention at
-            # extra[40..54].
-            from_accid = struct.unpack_from('<I', extra, 16)[0]
-            requester_charname = extra[24:39].rstrip(b'\x00').decode('ascii', errors='replace')
-            extra_nickname = extra[40:55].rstrip(b'\x00').decode('ascii', errors='replace')
-            # Direct polcore connections don't carry our xiloader credential
-            # header, so cred_account_id is 0. Fall back to the 6-byte
-            # account_id polcore sent in its Init packet -- first 2 bytes are
-            # the acctid (LE uint16). Same pattern send_friend_records uses.
-            to_accid = self.cred_account_id
-            if not to_accid and self.account_id:
-                to_accid = struct.unpack_from('<H', self.account_id, 0)[0]
-            chosen_nickname = nickname or extra_nickname or requester_charname
-            log(f"  Accept: from_accid={from_accid} ({requester_charname}) -> "
-                f"to_accid={to_accid} nick='{chosen_nickname}'", self.conn_id)
-            if from_accid and to_accid:
-                result = accept_friend_request(from_accid, to_accid, chosen_nickname)
-                log(f"  Accept result: {result}", self.conn_id)
-            else:
-                log(f"  Accept skipped: from={from_accid} to={to_accid}", self.conn_id)
+        # ---- identify both parties, whatever the packet shape ----
+        # Us: direct polcore connections carry no xiloader credential header,
+        # so fall back to the acctid polcore sent in its Init packet (LE u16).
+        me_accid = self.cred_account_id
+        if not me_accid and self.account_id:
+            me_accid = struct.unpack_from('<H', self.account_id, 0)[0]
+
+        zero = bytes(1)
+        # Extra+0x18 is the name THIS user typed: the nickname on an initiate,
+        # the acceptor's nickname for the sender on an accept. It is not a
+        # charname -- resolving it as one silently yields nothing. The 0x28
+        # field is filler on the initiate side.
+        # NUL-TERMINATED, not NUL-padded: bytes after the terminator are
+        # leftover filler, so rstrip() alone leaves the name plus garbage.
+        extra_typed_name = extra[0x18:0x27].split(zero)[0].decode('ascii', errors='replace')
+
+        # Target account. The declaration's charname is populated only on the
+        # accept side; on an initiate it is filler, so fall back to the account
+        # id the Extra carries. See the 'BefriendExtra dwords' log line for
+        # which offset actually holds it.
+        other_accid = get_accid_for_charname(target_charname) if target_charname else None
+        # Extra+0x14 identifies an ACCEPT: it echoes the notification id of the
+        # request being accepted (0 on an initiate). Match it against the
+        # pending requests addressed to us -- that names the requester exactly,
+        # with no guessing.
+        echo_notif_id = struct.unpack_from('<I', extra, 0x14)[0] if 0x18 <= len(extra) else 0
+        accepting_request = None
+        if echo_notif_id and me_accid:
+            salt = session_salt_for_account(me_accid)
+            for req in (get_pending_requests_for_account(me_accid) or []):
+                if request_notification_id(req['accid_from'], me_accid,
+                                           req.get('created_at'), salt) == echo_notif_id:
+                    accepting_request = req
+                    other_accid = req['accid_from']
+                    log(f"  accept of request {echo_notif_id} from "
+                        f"{other_accid} ({req.get('charname_from')})", self.conn_id)
+                    break
+            if accepting_request is None:
+                log(f"  Extra+0x14={echo_notif_id} matched no pending request",
+                    self.conn_id)
+
+        # Initiate: Extra+0x10 is two u16s -- charid low, account id high --
+        # holding befriend_submit's rec[6] and rec[5]. Read as a u32 it is
+        # nonsense (e.g. 0x03EF0006). Do NOT fall back to resolving the charid:
+        # on an accept that field holds something else entirely, and looking it
+        # up silently resolved a real but WRONG account.
+        if not other_accid and 0x14 <= len(extra):
+            packed_accid = struct.unpack_from('<H', extra, 0x12)[0]
+            if packed_accid and db_query('SELECT 1 FROM accounts WHERE id = %s', (packed_accid,)):
+                other_accid = packed_accid
+                packed_charid = struct.unpack_from('<H', extra, 0x10)[0]
+                log(f'  target account {packed_accid} (charid {packed_charid}) '
+                    f'from Extra+0x12', self.conn_id)
+
+        # ---- accept or create, decided from server state, not packet shape ----
+        pending_reverse = accepting_request is not None
+        if not pending_reverse and me_accid and other_accid:
+            pending_reverse = bool(db_query(
+                'SELECT 1 FROM account_friend_requests '
+                'WHERE accid_from = %s AND accid_to = %s LIMIT 1',
+                (other_accid, me_accid)))
+
+        from_accid = me_accid
+        to_accid = other_accid
+        # The declaration's [40:55] nickname is filler on an initiate, so prefer
+        # the name the user actually typed.
+        nickname = extra_typed_name or nickname
+        if pending_reverse:
+            if not nickname:
+                nickname = target_charname
+            result = accept_friend_request(to_accid, from_accid, nickname)
+            log(f"  Accept (via befriend reply) {to_accid} -> {from_accid} "
+                f"nick='{nickname}' result={result}", self.conn_id)
+        elif from_accid and to_accid:
+            # Initiator befriend flow -- create friend request
+            # Get sender's charname
+            sender_chars = db_query(
+                "SELECT c.charname FROM accounts_sessions s "
+                "JOIN chars c ON c.charid = s.charid "
+                "WHERE s.accid = %s LIMIT 1",
+                (from_accid,)
+            )
+            charname_from = sender_chars[0]['charname'] if sender_chars else 'Unknown'
+            if not nickname:
+                nickname = target_charname
+            create_friend_request(from_accid, to_accid, nickname, charname_from)
+            log(f"  Friend request created: {from_accid} -> {to_accid}", self.conn_id)
         else:
-            # No 168B Extra+Finalize sequence: figure out if this is an accept of
-            # a prior pending request, or a brand-new friend request.
-            from_accid = self.cred_account_id
-            to_accid = get_accid_for_charname(target_charname) if target_charname else None
+            log(f"  Cannot create request: from={from_accid} to={to_accid} target='{target_charname}'", self.conn_id)
 
-            pending_reverse = None
-            if from_accid and to_accid:
-                # Did the named target already send US a pending request? If so the
-                # client is accepting it (mes2frnd Reply submit), not initiating.
-                rows = db_query(
-                    "SELECT 1 FROM account_friend_requests "
-                    "WHERE accid_from = %s AND accid_to = %s LIMIT 1",
-                    (to_accid, from_accid)
-                )
-                pending_reverse = bool(rows)
-
-            if pending_reverse:
-                if not nickname:
-                    nickname = target_charname
-                result = accept_friend_request(to_accid, from_accid, nickname)
-                log(f"  Accept (via befriend reply) {to_accid} -> {from_accid} "
-                    f"nick='{nickname}' result={result}", self.conn_id)
-            elif from_accid and to_accid:
-                # Initiator befriend flow -- create friend request
-                # Get sender's charname
-                sender_chars = db_query(
-                    "SELECT c.charname FROM accounts_sessions s "
-                    "JOIN chars c ON c.charid = s.charid "
-                    "WHERE s.accid = %s LIMIT 1",
-                    (from_accid,)
-                )
-                charname_from = sender_chars[0]['charname'] if sender_chars else 'Unknown'
-                if not nickname:
-                    nickname = target_charname
-                create_friend_request(from_accid, to_accid, nickname, charname_from)
-                log(f"  Friend request created: {from_accid} -> {to_accid}", self.conn_id)
-            else:
-                log(f"  Cannot create request: from={from_accid} to={to_accid} target='{target_charname}'", self.conn_id)
-
-        # Resolve the friend identity to echo back in the 168B record.
-        # For accept (168B Extra + 8B Finalize): target was the original
-        # request initiator, charname comes from the from_accid in the
-        # BefriendRequest header.
-        # For initiator-side befriend: target is the charname we just
-        # parsed from data[24:39].
+        # Identity echoed back in the 168B record. Resolve it from the account
+        # we actually identified -- the declaration's charname is filler on an
+        # initiate, so echoing it sends the client a garbage name.
         echo_accid = None
-        echo_charname = target_charname or None
+        echo_charname = None
+        if other_accid:
+            _rows = db_query("SELECT charname FROM chars WHERE accid = %s LIMIT 1",
+                             (other_accid,))
+            if _rows:
+                echo_charname = _rows[0]['charname']
         insert_friend = False
         friend_index = None
-        if is_accept:
-            echo_accid = from_accid
+        # Echo the new friend only when a friendship was actually created --
+        # i.e. this was an accept. from_accid is US and to_accid is the friend,
+        # so the record echoed back is to_accid, not from_accid.
+        if pending_reverse:
+            echo_accid = to_accid
             sender_chars = db_query(
                 "SELECT charname FROM chars WHERE accid = %s LIMIT 1",
-                (from_accid,)
-            ) if from_accid else []
+                (to_accid,)
+            ) if to_accid else []
             echo_charname = sender_chars[0]['charname'] if sender_chars else None
             # Tell polcore to insert the new friend into its internal table
             # (DAT_046340D8) inline, matching retail behavior -- the
@@ -1627,14 +1809,14 @@ class FriendConnection:
             # 1..N are friend slots. Use the new friend count as the index
             # (= prior count + 1 in 1-based, since accept just inserted the
             # bidirectional friendship row).
-            if to_accid:
+            if from_accid:
                 cnt_rows = db_query(
                     "SELECT COUNT(*) AS c FROM account_friends WHERE accid_owner = %s",
-                    (to_accid,)
+                    (from_accid,)
                 )
                 friend_index = (cnt_rows[0]['c'] if cnt_rows else 1)
-        elif target_charname:
-            echo_accid = get_accid_for_charname(target_charname)
+        elif other_accid:
+            echo_accid = other_accid
 
         # Send AuthConfirm + BefriendResponse, then wait for polcore to close.
         #
@@ -1717,23 +1899,9 @@ class FriendConnection:
 
         Retail CallerC expects: AuthConfirm(24B) + Status(16B) + FIN.
 
-        Enhanced protocol: After the standard 16B Status, we send an additional
-        NotificationData packet containing message details that xiloader's
-        friend.cpp can parse from the descriptor residual.
-
-        NotificationData format (variable length):
-          [0:4]   magic    = 0x4C53424E ('LSBN' = LSB Notification)
-          [4]     msg_count (uint8)
-          [5:8]   reserved
-          Per message (168B each):
-            [0:4]   from_accid (uint32)
-            [4]     msg_type (canonical FFXiMain icon table:
-                    0=NRM, 1=FWT, 3=KNK, 9=FOK, 10=FNO; other -> OTR)
-            [5:8]   reserved
-            [8:24]  sender charname (16B, null-terminated)
-            [24:40] subject (16B, null-terminated)
-            [40:168] body (128B, null-terminated)
-        """
+        Notifications are delivered natively via NotifPickup + msgrec_recv;
+        this handler no longer emits the invented NotificationData block.
+"""
         accid = self.cred_account_id
         if not accid and self.account_id:
             accid = struct.unpack_from('<H', self.account_id, 0)[0]
@@ -1743,10 +1911,12 @@ class FriendConnection:
         # Build notification data with message details
         notif_messages = []
 
-        # Pending friend requests -> FOK-type messages (icon_type=9)
+        # Pending friend requests -> FWT (type 1, 'asking to be friends').
         for req in pending:
             notif_messages.append({
-                'msg_id': 0,
+                'msg_id': request_notification_id(req['accid_from'], accid,
+                                                  req.get('created_at'),
+                                                  session_salt_for_account(accid)),
                 'from_accid': req['accid_from'],
                 'msg_type': 1,  # FWT -- "asking to be friends" (incoming request)
                 'sender': req.get('charname_from', 'Unknown'),
@@ -1778,62 +1948,6 @@ class FriendConnection:
         self.send_auth_confirm(seq=seq, op=op, param=param)
         self.send_status(size=16, client_data=data)
 
-        # Send additional NotificationData if there are messages
-        if notif_messages:
-            notif_data, msg_count = _build_lsbn_response(notif_messages)
-            self.send_data("NotificationData", bytes(notif_data))
-            log(f"  CallerC: sent NotificationData ({len(notif_data)}B, {msg_count} msg(s))", self.conn_id)
-
-    def handle_lsbn_query(self, accid):
-        """Handle direct LSBN notification query from xiloader worker thread.
-
-        Simple protocol: client sends 'LSBN' + accid (8B total).
-        Server responds with LSBN notification data and closes.
-        """
-        pending = get_pending_requests_for_account(accid) if accid else []
-        unread = get_unread_messages(accid) if accid else []
-        log(f"  LSBN DB: pending={pending}, unread={unread}", self.conn_id)
-
-        notif_messages = []
-        for req in pending:
-            # Derive msg_id from created_at so a request that's deleted and
-            # re-created produces a different cache key on the client side
-            # (xiloader's s_injected_keys uses (from_accid, type, msg_id,
-            # subject) as the dedupe key -- a hardcoded msg_id=0 caused a
-            # newly-issued request after a DB wipe to be silently deduped
-            # against the stale key from the previous round).
-            created = req.get('created_at')
-            ts = int(created.timestamp()) & 0xFFFFFF if created else 0
-            notif_messages.append({
-                'msg_id': ts,
-                'from_accid': req['accid_from'],
-                'msg_type': 1,  # FWT -- "asking to be friends" (incoming request)
-                'sender': req.get('charname_from', 'Unknown'),
-                'subject': "Friend Request",
-                'body': f"Friend request from {req.get('charname_from', 'Unknown')}",
-            })
-        for msg in unread:
-            notif_messages.append({
-                'msg_id': msg['id'],
-                'from_accid': msg['from_accid'],
-                'msg_type': int(msg.get('msg_type', 0)),
-                'sender': msg.get('from_charname', f"Acct{msg['from_accid']}"),
-                'subject': msg.get('subject', 'No subject')[:15],
-                'body': msg.get('body', '')[:127],
-            })
-
-        resp, msg_count = _build_lsbn_response(notif_messages)
-
-        log(f"  LSBN query: {msg_count} notification(s) for accid={accid} "
-            f"(pending={len(pending)}, unread={len(unread)})", self.conn_id)
-        for i, nm in enumerate(notif_messages[:msg_count]):
-            log(f"    [{i}] from_accid={nm['from_accid']} type={nm['msg_type']} "
-                f"sender={nm['sender']!r} subj={nm['subject']!r}", self.conn_id)
-        try:
-            self.conn.sendall(bytes(resp))
-        except Exception as e:
-            log(f"  LSBN send error: {e}", self.conn_id)
-        self.close_connection()
 
     def handle_acpt_request(self, acceptor_accid, target_charname, nickname):
         """Direct accept used by xiloader to bypass the broken polcore CallerC
@@ -1872,7 +1986,7 @@ class FriendConnection:
                     # (CharB). Swap them.
                     accept_friend_request(target_accid, acceptor_accid, nick)
                     # Mark the friend-request msg in the inbox as read so it
-                    # disappears on the next LSBN poll. account_friend_messages
+                    # disappears on the next notification poll. account_friend_messages
                     # records of msg_type=1 from the target are the request notice.
                     db_execute(
                         "UPDATE account_friend_messages SET is_read = 1 "
@@ -1941,6 +2055,25 @@ class FriendConnection:
         self.send_auth_confirm(seq=seq, op=op, param=param,
                                force_status_zero=True)
 
+        # A user-composed message is announced here and UPLOADED afterwards:
+        # the frame carries only "O/m/<96-char filename>" plus size_param (the
+        # body length), and the client pushes the body bytes once we reply.
+        # The body is therefore picked up from the drained tail below, not from
+        # this frame -- an earlier attempt to parse it inline never fired.
+        self._pending_upload = None
+        if op_code != 0x16 and size_param:
+            sender_accid = self.cred_account_id
+            if not sender_accid and self.account_id:
+                sender_accid = struct.unpack_from('<H', self.account_id, 0)[0]
+            recipient = recipient_from_msg_filename(
+                data[0x10:0x10 + 0x17F],
+                bytes(self.auth_packet[16:24]) if self.auth_packet else bytes(8),
+                sender_accid)
+            if recipient:
+                self._pending_upload = (recipient, size_param)
+                log(f"  MsgUpload: announced {size_param}B for recipient {recipient}",
+                    self.conn_id)
+
         # Op 0x16 = dismiss. No body to send back; just mark message read in DB.
         if op_code == 0x16:
             self._handle_dismiss(data[0x10:0x10 + 0x17F])
@@ -1950,7 +2083,13 @@ class FriendConnection:
 
         # Default: body-fetch. Extract encoded filename from offset 0x10 and
         # look up the matching local msg body.
-        body_bytes = self._lookup_body_for_request(data[0x10:0x10 + 0x17F])
+        try:
+            body_bytes = self._lookup_body_for_request(data[0x10:0x10 + 0x17F])
+        except Exception as exc:
+            # Never let a lookup failure escape: this runs mid-transfer and an
+            # exception here drops the connection instead of the one request.
+            log(f"  Body-fetch lookup failed: {exc}", self.conn_id)
+            body_bytes = None
 
         if body_bytes is None:
             log(f"  Body-fetch: could not identify message -- sending zero size",
@@ -1982,19 +2121,46 @@ class FriendConnection:
         send() returns WSAECONNABORTED -> FUN_045905E0 maps to -6 -> op[6]=5 ->
         "Failed to send reply. (5)".
         """
+        collected = bytearray()
         try:
             self.conn.settimeout(2.0)
             while True:
                 tail = self.conn.recv(512)
                 if not tail:
                     break
+                collected += tail
                 log(f"  Tail recv after body response ({len(tail)}B): {tail[:32].hex()}...",
                     self.conn_id)
         except socket.timeout:
             log(f"  Tail wait timed out; closing", self.conn_id)
         except Exception as e:
             log(f"  Tail wait error: {e}", self.conn_id)
+        self._pending_tail = bytes(collected)
+        self._persist_uploaded_message()
         self.close_connection()
+
+    def _persist_uploaded_message(self):
+        """Store a message whose body arrived in the tail after our response."""
+        pending = getattr(self, '_pending_upload', None)
+        tail = getattr(self, '_pending_tail', b'')
+        if not pending or not tail:
+            return
+        recipient, size = pending
+        composed = parse_compose_payload(tail[:size])
+        if composed is None:
+            log(f"  MsgUpload: {len(tail)}B tail did not parse as a message",
+                self.conn_id)
+            return
+        subject, body = composed
+        sender = self.cred_account_id
+        if not sender and self.account_id:
+            sender = struct.unpack_from('<H', self.account_id, 0)[0]
+        log(f"  MsgUpload: from={sender} to={recipient} "
+            f"subject={subject!r} body={body!r}", self.conn_id)
+        if sender and recipient:
+            send_friend_message(from_accid=sender, to_accid=recipient,
+                                subject=subject, body=body, msg_type=0)
+        self._pending_upload = None
 
     def _handle_dismiss(self, body_payload):
         """Op-code 0x16 -- the user picked Read or Exit on a mes2frnd inbox row.
@@ -2062,6 +2228,14 @@ class FriendConnection:
         finding a file whose name appears in the request payload. The on-disk
         body file IS the body content we want to send back.
         """
+        # Serve from the DATABASE first. The on-disk file polcore wrote is only
+        # a PLACEHOLDER: subject <0x07> <recipient's own charname>. Returning it
+        # would echo that placeholder back as the message body -- which is
+        # exactly the "body shows my own name" symptom. The real text is ours.
+        body = self._body_from_db(payload)
+        if body is not None:
+            return body
+
         msg_dir = self._get_local_msg_dir()
         if not msg_dir or not os.path.isdir(msg_dir):
             log(f"  msg dir not found: {msg_dir}", self.conn_id)
@@ -2093,13 +2267,57 @@ class FriendConnection:
         log(f"  no matching 96-char filename found in payload", self.conn_id)
         return None
 
+    def _body_from_db(self, payload):
+        """Rebuild a message body from our own records.
+
+        The requested filename decodes to the usual 72-byte record, which
+        carries the SENDER name at +0x10 and a 13-char subject prefix at +0x20.
+        Together with the connection's account (the recipient) that identifies
+        the row, so no filesystem access is needed -- and the server stays
+        correct when it is not co-located with the client.
+        """
+        try:
+            from pol_b64 import decode as b64_decode
+            text = payload.split(bytes(1))[0].decode('ascii', errors='replace')
+            start = text.find('O/m/')
+            fname = text[start + 4:start + 100] if start >= 0 else text[:96]
+            if len(fname) < 96:
+                return None
+            raw = b64_decode(fname[:96])
+            sender_name = raw[0x10:0x20].split(bytes(1))[0].decode('ascii', 'replace')
+            subj_prefix = raw[0x20:0x30].split(bytes(1))[0].decode('ascii', 'replace')
+        except Exception as exc:
+            log(f"  body-from-db: could not decode request ({exc})", self.conn_id)
+            return None
+
+        me = self.cred_account_id
+        if not me and self.account_id:
+            me = struct.unpack_from('<H', self.account_id, 0)[0]
+        if not me or not sender_name:
+            return None
+
+        rows = db_query(
+            "SELECT m.subject, m.body FROM account_friend_messages m "
+            "JOIN chars c ON c.accid = m.from_accid "
+            "WHERE m.to_accid = %s AND c.charname = %s AND m.subject LIKE %s "
+            "ORDER BY m.id DESC LIMIT 1",
+            (me, sender_name, subj_prefix + '%'))
+        if not rows:
+            log(f"  body-from-db: no message to {me} from {sender_name!r} "
+                f"subj {subj_prefix!r}", self.conn_id)
+            return None
+
+        subject = (rows[0]['subject'] or '').encode('ascii', 'replace')
+        body = (rows[0]['body'] or '').encode('ascii', 'replace')
+        out = subject + bytes([7]) + body + bytes(1)
+        log(f"  body-from-db: served {len(out)}B for {sender_name!r} "
+            f"subj {subj_prefix!r}", self.conn_id)
+        return out
+
     def _get_local_msg_dir(self):
         """The Ashita-side msg dir (one level above the bootloader exe).
         Mirrors xiloader's main.cpp EnsureMsgDir."""
-        root = os.environ.get('ASHITA_ROOT')
-        if not root:
-            raise RuntimeError('set ASHITA_ROOT to the Ashita install directory')
-        return os.path.join(root, 'msg', 'r', 'b')
+        return os.path.join(ashita_root(), 'msg', 'r', 'b')
 
     def handle_notification(self, data):
         """Handle 416B (3,3) IXFF body -- used by TWO distinct polcore SMs:
@@ -2146,25 +2364,34 @@ class FriendConnection:
             records_meta = []
             for p in pending[:8]:
                 records_meta.append({
-                    'from_accid': p.get('from_accid', 0),
-                    'msg_id': p.get('id', 0),
-                    'msg_type': 9,  # friend request
+                    # Keys are accid_from / charname_from -- the names the
+                    # query actually selects. from_accid / from_charname read
+                    # as absent, which is why records went out as from=0 with
+                    # an empty sender.
+                    'from_accid': p.get('accid_from', 0),
+                    'msg_id': request_notification_id(p.get('accid_from', 0),
+                                                      accid,
+                                                      p.get('created_at'),
+                                                      session_salt_for_account(accid)),
+                    'msg_type': 1,  # FWT -- incoming request. 9 is FOK (accepted).
                     'created_at': int(p.get('created_at', datetime.utcnow()).timestamp())
                                    if hasattr(p.get('created_at', None), 'timestamp')
                                    else int(time.time()),
-                    'sender': p.get('from_charname', '')[:15],
+                    'sender': (p.get('charname_from') or '')[:15],
                     'subject': 'Friend Request',
+                    'body': f"Friend request from {p.get('charname_from') or 'Unknown'}",
                 })
             for u in unread[:8]:
                 records_meta.append({
                     'from_accid': u.get('from_accid', 0),
                     'msg_id': u.get('id', 0),
-                    'msg_type': u.get('msg_type', 9),
+                    'msg_type': u.get('msg_type', 0),
                     'created_at': int(u.get('created_at', datetime.utcnow()).timestamp())
                                    if hasattr(u.get('created_at', None), 'timestamp')
                                    else int(time.time()),
                     'sender': u.get('from_charname', '')[:15],
                     'subject': u.get('subject', '')[:13],
+                    'body': (u.get('body') or '')[:150],
                 })
 
             count = len(records_meta)
@@ -2192,6 +2419,26 @@ class FriendConnection:
                         struct.pack_into('<H', raw, 0x3E, 0x0880)
                         raw_records.append(bytes(raw))
 
+                        # Body continuation records. The msgrec entry has no
+                        # body field and polcore ignores the per-record pad, so
+                        # the text is carried in extra entries -- entry bytes
+                        # 0x10..0x47 are opaque to polcore (our convention),
+                        # and xiloader reassembles them and drops them from the
+                        # inbox queue.
+                        text = (m.get('body') or '').encode('ascii', 'replace')
+                        for ci in range(0, (len(text) + MSGREC_CHUNK - 1) // MSGREC_CHUNK):
+                            piece = text[ci * MSGREC_CHUNK:(ci + 1) * MSGREC_CHUNK]
+                            c = bytearray(0x48)
+                            struct.pack_into('<Q', c, 0x00,
+                                             (m['msg_id'] ^ ((ci + 1) << 24)) & 0xFFFFFFFFFFFFFFFF)
+                            struct.pack_into('<I', c, 0x10, m['msg_id'])
+                            struct.pack_into('<I', c, 0x14, ci)
+                            c[0x18] = MSGREC_TYPE_BODY_CHUNK
+                            c[0x19:0x19 + len(piece)] = piece
+                            struct.pack_into('<H', c, 0x3E, 0x0880)
+                            raw_records.append(bytes(c))
+
+                    count = len(raw_records)
                     body = build_msgrec_response_body(raw_records, token_8b)
                     size_header = struct.pack('<II', count, 0)
                     trailer = msgrec_trailer(size_header, body)
@@ -2217,7 +2464,7 @@ class FriendConnection:
             # msgrec_recv_pump if count > 0 (high-level orchestration that
             # we don't see in the dump -- likely happens via a vtable consumer
             # on FFXi side).
-            count = len(unread) + len(pending)
+            count = msgrec_record_count(pending, unread)
             size_header = struct.pack('<II', count, 0)
             self.send_data("NotifSizeHeader", size_header)
             log(f"  NotifPickup: AuthConfirm + 8B [count={count}][0]; "
@@ -2852,7 +3099,7 @@ class FriendConnection:
             checksum = (checksum + struct.unpack_from('<I', plain, i)[0]) & 0xFFFFFFFF
         struct.pack_into('<I', plain, 44, checksum)
 
-        # Persist the friend request so the target's LSBN poll surfaces it as
+        # Persist the friend request so the target's notification poll surfaces it as
         # an inbox notification on next refresh. The handshake itself only
         # confirms the target exists -- actual request creation happens here.
         from_accid = self.cred_account_id
@@ -3390,6 +3637,20 @@ class PolPushConnection:
         # first 8 bytes decrypt as raw ^ KEY ^ IV. Encoding raw = accid ^ KEY
         # therefore yields accid ^ IV -- exactly what is stored -- for ANY IV,
         # so the server never has to know it.
+
+        # A status push is addressed by friend INDEX, so it is dropped if the
+        # client's friend array has no such slot yet. When a friendship is
+        # created mid-session the push races the client's friend_status
+        # refresh and loses -- and the cache then reads 'already ONLINE', so
+        # nothing is re-announced and the friend shows offline indefinitely.
+        # Reset the cache whenever the friend set changes.
+        current_ids = tuple(sorted(
+            (f.get('accid') or f.get('accid_target') or 0) for f in friends))
+        if current_ids != getattr(self, '_friend_ids', None):
+            if getattr(self, '_friend_ids', None) is not None:
+                log(f'[{self.tag}] POL PUSH friend set changed -- re-announcing')
+            self._friend_ids = current_ids
+            self._status = {}
 
         for i, f in enumerate(friends[:63]):
             index = i + 1               # slot 0 is self; matches CallerB

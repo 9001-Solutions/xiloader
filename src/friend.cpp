@@ -531,7 +531,7 @@ static char s_befriend_target_nickname[16] = {};
 static std::queue<BefriendRequest> s_befriend_queue;
 static std::mutex s_befriend_mtx;
 
-/* LSBN-bypass scaffolding: write_msg_file pipeline. Replace with native polcore
+/* write_msg_file pipeline. Replace with native polcore
  * NotificationResponse-driven msg-file writing once that path is online. */
 struct NotifMessage {
     uint32_t from_accid;
@@ -574,7 +574,7 @@ static constexpr int MAX_CACHED_MESSAGES = 7;
 
 /* Session-level dedup: prevents writing the same msg file twice per session. */
 static std::set<std::string> s_injected_keys;
-static int s_pending_notif_count = 0;  /* LSBN server-side count -- drives overlay badge */
+static int s_pending_notif_count = 0;  /* pending-notification count -- drives overlay badge */
 
 static std::string make_message_key(const NotifMessage& nm)
 {
@@ -1693,12 +1693,10 @@ static void __cdecl Mine_PolNotifCBReg(void* fn)
  *
  * Convention is __cdecl, confirmed by the stub being RET rather than RET 8.
  * Getting this wrong corrupts polcore's stack. */
-static volatile LONG s_notif_op_hits[8] = {};
 static void __cdecl Mine_PolStatusNotify(int opcode, void* data)
 {
+    (void)opcode;
     (void)data;
-    if (opcode >= 0 && opcode < 8)
-        InterlockedIncrement(&s_notif_op_hits[opcode]);
     s_resync_pending = true;
 }
 
@@ -1748,48 +1746,6 @@ static int __cdecl Mine_ChatDispatcher(void* args)
     return Real_ChatDispatcher ? Real_ChatDispatcher(args) : 0;
 }
 
-/* DAT message display thunk hook (FFXi+0x152DD0). Catches every localized
- * message FFXi shows from a DAT file, including "Unable to send. (N)" which
- * is category=10, msg_id=0x70 emitted from befriend_response_callback. Logs
- * caller IP so we can identify which code path is producing each message. */
-typedef int (__cdecl* FnDatMsgThunk)(uint32_t category, uint32_t msg_id, uint32_t a3, uint32_t a4, uint32_t a5);
-static FnDatMsgThunk Real_DatMsgThunk = nullptr;
-static int __cdecl Mine_DatMsgThunk(uint32_t category, uint32_t msg_id, uint32_t a3, uint32_t a4, uint32_t a5)
-{
-    /* Log the FIRST occurrence of each (category, id) with its caller, to
-     * identify which code path renders a given message. Used to find what
-     * displays "POL-0008 Connection terminated or not available" when the
-     * profile server goes away -- guessing at the surfacing path has already
-     * cost two wrong fixes. Dedupe keeps it from flooding the log. */
-    static std::set<uint64_t> s_seen;
-    static std::mutex s_seen_mtx;
-    const uint64_t key = ((uint64_t)category << 32) | msg_id;
-    bool first = false;
-    {
-        std::lock_guard<std::mutex> lk(s_seen_mtx);
-        first = s_seen.insert(key).second;
-    }
-    if (first)
-    {
-        const uintptr_t ip = (uintptr_t)_ReturnAddress();
-        const char* mod = "?";
-        uint32_t rva = (uint32_t)ip;
-        if (s_ffxiBase && ip >= (uintptr_t)s_ffxiBase && ip < (uintptr_t)s_ffxiBase + 0x800000)
-        {
-            mod = "FFXi";
-            rva = (uint32_t)(ip - (uintptr_t)s_ffxiBase);
-        }
-        else if (s_polBase && ip >= (uintptr_t)s_polBase && ip < (uintptr_t)s_polBase + 0x451000)
-        {
-            mod = "pol";
-            rva = (uint32_t)(ip - (uintptr_t)s_polBase);
-        }
-        xiloader::console::output_to_channel("friend",
-            "DatMsg: category=%u id=0x%X (a3=0x%X a4=0x%X a5=0x%X) from %s+0x%X",
-            category, msg_id, a3, a4, a5, mod, rva);
-    }
-    return Real_DatMsgThunk ? Real_DatMsgThunk(category, msg_id, a3, a4, a5) : 0;
-}
 
 /* /befriend chat command handler hook (FFXi+0x79F50). Logs the token count
  * (iRam04a8c488), the servmes buffer, and the token pointers. The handler
@@ -4787,7 +4743,6 @@ static void nop_bytes(uint8_t* addr, int count)
 static bool s_notif_overlay_applied = false;
 static uint32_t s_notif_cb_expected = 0;
 static bool s_notif_cb_drift_logged = false;
-static LONG s_notif_op_seen[8]      = {};
 
 /* FFXiMain add_notification (FFXi+0xF2680) -- __thiscall(manager, buf48), RET 4.
  * Called from the worker thread under SEH protection. */
@@ -5640,7 +5595,7 @@ static void classify_addr(uint32_t addr, char* out, size_t out_sz)
     _snprintf_s(out, out_sz, _TRUNCATE, "unknown");
 }
 
-/* Build the 72-byte filename metadata block. LSBN-bypass scaffolding --
+/* Build the 72-byte filename metadata block.
  * polcore would write this file in response to NotificationResponse natively.
  * Layout decoded from retail home01\msg\r\b\ filenames:
  *   +0x00 sender accid (4B) + msg_id (4B) -- XOR-encrypted on disk
@@ -5715,10 +5670,16 @@ static bool write_msg_file(NotifMessage& nm)
 {
     /* Build body first so size can be embedded in the filename at +0x38
      * (polcore body-parser walk limit). */
-    std::string body(nm.subject);  /* subject reused as body text for now */
-    body += '\x07';
-    body += globals::g_Username;
-    body += '\x00';
+    /* Wire format is subject <0x07> body <0x00> -- the same layout polcore
+     * writes for sent messages. This previously emitted the SUBJECT as the
+     * text and the local account's own name as the body, which made every
+     * received message read as your own charname and, with an empty
+     * subject, produced the blank "ghost" rows.
+     */
+    std::string body(nm.subject);
+    body += (char)0x07;
+    body += nm.body;
+    body += (char)0;
     uint32_t body_size = (uint32_t)body.size();
 
     /* Capture timestamp here so nm.timestamp matches the on-disk filename's
@@ -5793,7 +5754,7 @@ static void trigger_inbox_refresh(const char* reason)
 /* React to native polcore dismissals: Read/Exit moves the msg file
  * msg/r/b/ -> msg/r/a/. For each cached entry whose filename is now in /a/,
  * drop it from the cache and refresh the UI. Key stays in s_injected_keys
- * so the next LSBN poll doesn't re-inject the same message back into /b/. */
+ * so the next notification poll doesn't re-inject the same message into /b/. */
 static void sweep_dismissed_messages()
 {
     if (s_cached_messages.empty()) return;
@@ -6210,7 +6171,7 @@ static void monitor_msg_obj_clicks()
                     Real_PolBodyFetchDriver = (FnPolBodyFetchDriver)(s_polBase + OFF_POL_BODY_FETCH_DRIVER);
                     Real_PolCallerCInit     = (FnPolCallerCInit)(s_polBase + OFF_POL_CALLERC_INIT);
                     Real_PolBefriendDriver  = (FnPolBefriendDriver)(s_polBase + OFF_POL_BEFRIEND_DRIVER);
-                    /* BefriendOuter, BefriendInner, BefriendHandler, DatMsgThunk,
+                    /* BefriendOuter, BefriendInner, BefriendHandler,
                      * ChatDispatcher: now installed at STATE_READY entry instead. */
                     Real_PolNotifCBReg = (FnPolNotifCBReg)(s_polBase + OFF_POL_NOTIF_CB_REG);
                     Real_PolNotifEnqueue = (FnPolNotifEnqueue)(s_polBase + OFF_POL_NOTIF_ENQUEUE);
@@ -6255,7 +6216,7 @@ static void monitor_msg_obj_clicks()
                     DetourAttach(&(PVOID&)Real_PolBodyFetchDriver, (PVOID)Mine_PolBodyFetchDriver);
                     DetourAttach(&(PVOID&)Real_PolCallerCInit,    (PVOID)Mine_PolCallerCInit);
                     DetourAttach(&(PVOID&)Real_PolBefriendDriver, (PVOID)Mine_PolBefriendDriver);
-                    /* BefriendOuter/Inner/Handler, DatMsgThunk, ChatDispatcher
+                    /* BefriendOuter/Inner/Handler, ChatDispatcher
                      * are attached earlier at STATE_READY entry. */
                     DetourAttach(&(PVOID&)Real_PolNotifCBReg, (PVOID)Mine_PolNotifCBReg);
                     DetourAttach(&(PVOID&)Real_PolNotifEnqueue, (PVOID)Mine_PolNotifEnqueue);
@@ -6449,71 +6410,6 @@ static void pump_callerC()
 
     if (desc[0] == 0)
     {
-        /* Scan the full descriptor stride (0x338B) for LSBN magic
-         * (0x4C53424E). polcore stores received data inline. */
-        if (s_callerC_is_notification)
-        {
-            bool found_notif = false;
-            for (int scan = 0; scan <= (int)OFF_DESC_STRIDE - 8; scan += 4)
-            {
-                uint32_t dw = *(uint32_t*)(desc + scan);
-                if (dw == 0x4C53424E)  /* 'LSBN' */
-                {
-                    xiloader::console::output_to_channel("friend",
-                        "FriendSys: LSBN magic found at desc+0x%X", scan);
-
-                    uint8_t* notif = desc + scan;
-                    uint8_t msg_count = notif[4];
-                    if (msg_count == 0 || msg_count > 10)
-                    {
-                        xiloader::console::output(xiloader::color::warning,
-                            "FriendSys: invalid msg_count=%d", msg_count);
-                        break;
-                    }
-
-                    for (int mi = 0; mi < msg_count; mi++)
-                    {
-                        uint8_t* msg_data = notif + 8 + mi * 168;
-
-                        if ((scan + 8 + (mi + 1) * 168) > (int)OFF_DESC_STRIDE)
-                        {
-                            xiloader::console::output(xiloader::color::warning,
-                                "FriendSys: notification msg[%d] exceeds descriptor bounds", mi);
-                            break;
-                        }
-
-                        NotifMessage nm = {};
-                        nm.from_accid = *(uint32_t*)(msg_data + 0);
-                        uint32_t packed = *(uint32_t*)(msg_data + 4);
-                        nm.msg_type = (uint8_t)(packed & 0xFF);
-                        nm.msg_id   = (packed >> 8) & 0xFFFFFF;
-
-                        memcpy(nm.sender, msg_data + 8, 15);
-                        nm.sender[15] = 0;
-                        memcpy(nm.subject, msg_data + 24, 15);
-                        nm.subject[15] = 0;
-                        memcpy(nm.body, msg_data + 40, 127);
-                        nm.body[127] = 0;
-
-                        xiloader::console::output_to_channel("friend",
-                            "FriendSys: notification[%d] type=%d id=%u from='%s' subj='%s'",
-                            mi, nm.msg_type, nm.msg_id, nm.sender, nm.subject);
-
-                        std::lock_guard<std::mutex> lk(s_notif_mtx);
-                        /* Same dedup as the LSBN direct-fetch path. */
-                        std::string key = make_message_key(nm);
-                        if (s_injected_keys.count(key))
-                            continue;
-                        s_injected_keys.insert(key);
-                        s_notif_queue.push(nm);
-                    }
-
-                    found_notif = true;
-                    break;
-                }
-            }
-
-        }
 
         xiloader::console::output_to_channel("friend",
             "FriendSys: CallerC %s completed (%d pumps)",
@@ -6668,8 +6564,18 @@ static void pump_notification_pickup()
         s_notif_pickup_active = false;
         s_notif_pickup_done_once = true;
 
-        s_msgrec_expected = 1;
-        s_msgrec_probe_pending = true;
+        /* Fetch every record the pickup announced, not just one.
+         * result_val is the count polcore read from the NotifPickup header;
+         * hardcoding 1 configured polcore's SM for a single record, so a
+         * multi-record response never completed and NOTHING was parsed --
+         * only the first pending message was ever delivered. */
+        uint32_t announced = result_val;
+        if (announced > 16) announced = 16;
+        s_msgrec_expected = announced;
+        /* Zero means nothing pending: do NOT fetch anyway. Fetching one record
+         * regardless produced a zeroed entry that became an empty message and
+         * got written to disk as a blank inbox row -- the "ghost" message. */
+        s_msgrec_probe_pending = (announced > 0);
         return;
     }
 
@@ -6756,13 +6662,39 @@ static void try_start_msgrec_recv(uint32_t expected_count)
 }
 
 /* Translate decoded msgrec entries (per docs/profile-server/msgrec-entry-layout.md)
- * into NotifMessage objects on s_notif_queue, reusing LSBN's dedup keying.
+ * into NotifMessage objects on s_notif_queue.
  * Returns the number of new entries bridged. write_notification_files() drains
  * the queue and feeds the existing native msg-object injection. */
+/* Body-continuation records (see docs/profile-server/message-send-path.md).
+ * entry[0x19..0x3D] carries text; 0x3E/0x3F stay the 0x0880 flag word. */
+static constexpr uint32_t MSGREC_CHUNK = 0x25;
+static constexpr uint8_t  MSGREC_TYPE_BODY_CHUNK = 0xFE;
+static std::map<uint32_t, std::string> s_body_chunks;
+
 static int bridge_msgrec_to_notif_queue(const uint8_t* buf, uint32_t count)
 {
     int bridged = 0;
     std::lock_guard<std::mutex> lk(s_notif_mtx);
+
+    /* Pre-pass: continuation records FOLLOW their parent, so chunks must be
+     * collected before any message is built -- otherwise every body is
+     * attached one delivery late, or missed entirely. */
+    for (uint32_t i = 0; i < count; i++)
+    {
+        const uint8_t* e = buf + i * 0x50;
+        if (e[0x18] != MSGREC_TYPE_BODY_CHUNK)
+            continue;
+        uint32_t parent = *(uint32_t*)(e + 0x10);
+        uint32_t index  = *(uint32_t*)(e + 0x14);
+        char piece[MSGREC_CHUNK + 1] = {};
+        memcpy(piece, e + 0x19, MSGREC_CHUNK);
+        size_t at = (size_t)index * MSGREC_CHUNK;
+        std::string& acc = s_body_chunks[parent];
+        if (acc.size() < at)
+            acc.resize(at, 32);
+        acc.replace(at, strlen(piece), piece, strlen(piece));
+    }
+
     for (uint32_t i = 0; i < count; i++)
     {
         const uint8_t* e = buf + i * 0x50;
@@ -6771,17 +6703,35 @@ static int bridge_msgrec_to_notif_queue(const uint8_t* buf, uint32_t count)
         nm.msg_id     = *(uint32_t*)(e + 0x14);
         nm.msg_type   = e[0x18];
         nm.timestamp  = *(uint32_t*)(e + 0x1C);
+        /* Body-continuation record: carries message text, not an inbox row.
+         * The msgrec entry has no body field and polcore ignores the
+         * per-record pad, so the server splits the text across extra entries
+         * (entry[0x10..0x47] is opaque to polcore). Stitch them onto the
+         * parent by msg_id and never queue them. */
+        if (nm.msg_type == MSGREC_TYPE_BODY_CHUNK)
+            continue;   /* already gathered in the pre-pass */
+
         memcpy(nm.sender,  e + 0x20, 15);
         memcpy(nm.subject, e + 0x30, 13);
-        /* Body not carried over msgrec wire -- body fetch on click is a
-         * separate native polcore SM (FUN_045A6870). Leave empty for the
-         * inbox row; real content arrives on click-to-read. */
 
         xiloader::console::output_to_channel("friend",
             "FriendSys: MsgRecRecv[%u] from=%u id=%u type=%u ts=%u "
             "sender='%s' subj='%s' flag=%04X",
             i, nm.from_accid, nm.msg_id, nm.msg_type, nm.timestamp,
             nm.sender, nm.subject, *(uint16_t*)(e + 0x3E));
+
+        /* A record with no sender and no subject carries nothing renderable;
+         * queueing it writes a blank inbox row. */
+        if (nm.sender[0] == 0 && nm.subject[0] == 0)
+            continue;
+
+        auto bit = s_body_chunks.find(nm.msg_id);
+        if (bit != s_body_chunks.end())
+        {
+            strncpy(nm.body, bit->second.c_str(), sizeof(nm.body) - 1);
+            nm.body[sizeof(nm.body) - 1] = (char)0;
+            s_body_chunks.erase(bit);
+        }
 
         std::string key = make_message_key(nm);
         if (s_injected_keys.count(key)) continue;
@@ -7737,13 +7687,11 @@ void friend_system::on_tick()
                 if (!s_befriend_diag_hooks)
                 {
                     Real_BefriendHandler  = (FnBefriendHandler)(s_ffxiBase + OFF_FFXI_BEFRIEND_HANDLER);
-                    Real_DatMsgThunk      = (FnDatMsgThunk)(s_ffxiBase + OFF_FFXI_DAT_MSG_THUNK);
                     Real_BefriendOuter    = (FnBefriendOuter)(s_ffxiBase + OFF_FFXI_BEFRIEND_OUTER);
                     Real_BefriendInner    = (FnBefriendInner)(s_ffxiBase + OFF_FFXI_BEFRIEND_INNER);
                     DetourTransactionBegin();
                     DetourUpdateThread(GetCurrentThread());
                     DetourAttach(&(PVOID&)Real_BefriendHandler,   (PVOID)Mine_BefriendHandler);
-                    DetourAttach(&(PVOID&)Real_DatMsgThunk,        (PVOID)Mine_DatMsgThunk);
                     DetourAttach(&(PVOID&)Real_BefriendOuter,      (PVOID)Mine_BefriendOuter);
                     DetourAttach(&(PVOID&)Real_BefriendInner,      (PVOID)Mine_BefriendInner);
                     Real_BefriendSubmit  = (FnBefriendSubmit)(s_ffxiBase + OFF_FFXI_BEFRIEND_SUBMIT);
@@ -8051,17 +7999,6 @@ void friend_system::on_tick()
                 }
             }
 
-            for (int op = 0; op < 8; op++)
-            {
-                const LONG n = s_notif_op_hits[op];
-                if (n != s_notif_op_seen[op])
-                {
-                    xiloader::console::output_to_channel("friend",
-                        "NotifCB: opcode %d fired (%ld total)", op, n);
-                    s_notif_op_seen[op] = n;
-                }
-            }
-
             /* Bring up the POL push channel (live friend status updates). */
             pump_pol_push();
 
@@ -8276,7 +8213,8 @@ void friend_system::on_tick()
             {
                 /* One-shot probe -- triggered after each NotifPickup completes. */
                 s_msgrec_probe_pending = false;
-                try_start_msgrec_recv(s_msgrec_expected ? s_msgrec_expected : 1);
+                if (s_msgrec_expected > 0)
+                    try_start_msgrec_recv(s_msgrec_expected);
             }
 
             /* Drive WhoIs (per-friend status query) if active, else fire one

@@ -342,3 +342,19 @@ Verified 1:1 -- every server push produces exactly one opcode-2 callback:
     15:24:13.491 accid 1007 OFFLINE  ->  15:24:13 opcode 2
     15:24:28.786 accid 1007 ONLINE   ->  15:24:28 opcode 2
     15:24:35.659 accid 1000 ONLINE   ->  15:24:35 opcode 2
+
+
+## Status pushes are index-addressed -- re-announce when the friend set changes
+
+A status NOTICE targets a friend by **index**, so the client drops it if its
+friend array has no such slot yet. Creating a friendship mid-session races the
+client's `friend_status` refresh: the push goes out first, is discarded, and the
+poller's change-detection cache then reads "already ONLINE" and never
+re-announces. The friend shows offline indefinitely.
+
+Observed exactly: push at 17:00:47, client's friend_status refresh at 17:01:08,
+and `Array2[1]+0x8` stuck at 0x00000006 instead of 0x00072006 -- the online bits
+(0x00072000) come from the push channel, NOT from friend_status.
+
+The poller therefore tracks the set of friend account ids and clears its status
+cache whenever that set changes, re-announcing every slot on the next poll.

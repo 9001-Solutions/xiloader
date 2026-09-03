@@ -19,6 +19,40 @@ Table at `type_str_table (FFXi+0x384178)`, 8 bytes per entry, 13 entries:
 | 11  | 0x3841D0 | `[OTR]` | unknown |
 | 12  | 0x3841D8 | `[OTR]` | unknown |
 
+## Icon label table -- VERIFIED from the 2026-08-31 client
+
+Read directly from a validated dump (FFXiMain base 0x04A50000). The label table
+is at **RVA 0x385180**, 8-byte stride; `type_to_idx` is **RVA 0x200650** and the
+accessor `label = table + idx * 8` is at RVA 0x200630.
+
+NOTE: earlier revisions of this file cited the table at RVA 0x384178. That is
+stale by 0x1008 and lands in unrelated binary data on the current client.
+
+| idx | label   | | idx | label   |
+|----:|---------|-|----:|---------|
+| 0   | `[NRM]` | | 7   | `[GRP]` |
+| 1   | `[FWT]` | | 8   | `[GRP]` |
+| 2   | `[FOK]` | | 9   | `[GRP]` |
+| 3   | `[FNO]` | | 10  | `[KNK]` |
+| 4   | `[GRP]` | | 11  | `[OTR]` |
+| 5   | `[GRP]` | | 12  | `[SYS]` |
+| 6   | `[GRP]` | | 13  | `menu`  |
+
+Full `type_to_idx` switch, verbatim:
+
+| type | idx | label | type | idx | label |
+|-----:|----:|-------|-----:|----:|-------|
+| 0    | 0   | NRM   | 15   | 5   | GRP   |
+| 1    | 1   | FWT   | 16   | 6   | GRP   |
+| 3    | 10  | KNK   | 17   | 7   | GRP   |
+| 9    | 2   | FOK   | 18   | 8   | GRP   |
+| 10   | 3   | FNO   | 19   | 9   | GRP   |
+| 14   | 4   | GRP   | 30   | 12  | SYS   |
+
+Anything not listed falls through to idx 11 = `[OTR]`.
+
+**type 1 = FWT = incoming friend request; type 9 = FOK = request accepted.**
+
 ## Type-int → table index — `type_to_idx (FFXi+0x2005D0)`
 
 | Type-int | Table idx | Label |
@@ -317,3 +351,40 @@ void polcore_body_lookup_thunk(void) {
 Thin thunk through `DAT_04A65A24 + 0x43C` — a function pointer stored as a member of the polcore COM object (`DAT_04A65A24` is FFXi's cached polcore object pointer, set by `polcore_obj_init (FFXi+0x625700)`).
 
 Looks up the message body (by filename) in polcore's local cache. Returns 0 if not found, non-zero (with body data written to the output buffer) if found. The cache is populated by polcore's file-load + decryption pipeline.
+
+
+## Ghost messages -- one empty message per account, per login (UNRESOLVED)
+
+Symptom: an inbox row with no sender and no subject. Reproducible on a clean
+login with an empty DB and no msg files on disk.
+
+Established:
+
+- The file lands in `msg/<accid>/r/b/` so it renders in the inbox (which
+  enumerates `r/b` only).
+- The FILENAME decodes to a 72-byte record with `flag=0x8000`, i.e. msg_type 0
+  (`[NRM]`), and everything from +0x10 onward zeroed -- no sender, no subject.
+- The file CONTENT is 10 bytes: `07 "<charname>" 00`, i.e. polcore's standard
+  `subject <0x07> body <0x00>` payload with an EMPTY subject and the body set
+  to **that account's own character name**.
+- **polcore writes it locally.** The server never serves that body -- there is
+  no matching `Body-fetch: sent` in the log, and it appears even when no
+  body-fetch occurred.
+- Exactly ONE per account per login. Observed 1000 at 13:39:28 and 1007 at
+  13:39:53 after a clean relaunch.
+
+Ruled out:
+
+- Not caused by the server dying mid-transfer. It still appears after the
+  `ashita_root()` fix that stopped connections being dropped.
+- Not caused by `count=0` notification responses. 16 such responses were sent
+  across the same window that produced only 2 ghosts, and one account received
+  a `count=0` with no ghost at all.
+- Not stale state. Reproduced with `account_friend_messages` emptied and the
+  whole `msg/` tree deleted with both clients stopped first.
+
+Not yet known: which polcore operation writes it. Since the body is the
+account's own charname with no subject, it looks like a self-record written
+during login rather than a delivered message. It is harmless to the data model
+but user-visible, so it needs its own investigation -- the trigger is NOT the
+notification path, which is where the search has been concentrated so far.

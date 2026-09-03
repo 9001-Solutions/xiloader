@@ -11,13 +11,27 @@ the search server (port 54002 in our setup), bypassing polcore. xi_search may
 use ZMQ IPC to consult map server for online-player data, but that's its
 internal detail; the FFXi→xi_search hop is plain TCP.
 
-In our build the search-server endpoint (`DAT_04ABD8B4` IP / `DAT_04ABD8B8`
-port) is **zero** because the LSB lobby login response doesn't populate the
-fields FFXi reads (`DAT_04AEE768 + 0x13808` IP / `+0x1380C` port). The dialog
-tries to `connect()` to `0.0.0.0:0`, fails silently, the dialog hangs without
-any rows, and when the user accepts anyway, `befriend_submit` runs with
-`rec[5]=0` and the polcore submit dies with `result_code=5` ("Unable to send.
-(5)").
+**CORRECTED 2026-08-26.** An earlier revision of this document claimed the
+search-server endpoint was zero because the LSB lobby response did not populate
+it. That is wrong. LSB *does* send it -- `data_session.cpp` sets
+`characterSelectionResponse.cache_ip = session.serverIP` and
+`cache_port = network.SEARCH_PORT`, and logs it on every login:
+
+    data_session: zoneid: 79, zoneipp: 127.0.0.1:54230, searchipp: 127.0.0.1:54002
+
+FFXi connects and queries successfully. Confirmed in `log/search-server.log`
+during a live `/befriend`:
+
+    Search Request: SEARCH_ALL (0), size: 76, ip: 127.0.0.1
+    Name: <target> Job: 0 Lvls: 0 ~ 0
+    Found 1 results, displaying 1
+
+The original "endpoint is zero" reading came from RVAs rebased off a stale
+Ghidra image whose non-.text sections were mismapped, so every data address
+resolved to the wrong bytes. See the dump-procedure note below.
+
+**The real gap: LSB's search response carries no POL account id.**
+`befriend_submit` needs one in `rec[5]`, and it stays 0.
 
 ## Native chain (when working)
 
@@ -208,3 +222,90 @@ After both fixes, the entire native chain works:
 | `0x04AEE768 + 0x1380C` | search-server port                            |
 | `0x04AEE768 + 0x13824 + slot*0x8C` | search IP per char slot          |
 | `0x04AEE768 + 0x13828 + slot*0x8C` | search port per char slot         |
+
+
+## Why `rec[5]` is 0: the search response has no account id
+
+`SearchEntity` (`src/search/data_loader.h`) has no `accid` field, and
+`CDataLoader::GetPlayersList` never selects one -- even though it queries
+`accounts_sessions`, which has it. The per-player wire layout
+(`src/search/packets/search_list.cpp`, `AddPlayer`) emits:
+
+    SearchType::Id        -> player.id  (charid, 20 bits)
+    SearchType::Unknown0E -> 0          (32 bits, HARDCODED ZERO)
+
+`SearchType::Friend` (0x0C) is defined in `src/search/enums/search_type.h` but
+never emitted at all.
+
+So FFXi receives a row with a character id and a zeroed 32-bit field.
+`befriend_submit` runs with `rec[5]=0` (no target account) and `rec[6]` holding
+packed `(zone, world, lo16)`. A server reading `rec[6]` as an account id gets a
+small nonsense value -- observed as `target_accid=6` for a target whose real
+account id was 1007.
+
+### SETTLED: `rec[5]` is `SearchType::Unknown0E` (0x0E)
+
+Determined by reverse-engineering the row parser, not by guessing. In the
+2026-08-26 client (FFXiMain base 0x04A50000):
+
+    search_recv_cb            FFXi+0x0E1F90   third slot callback
+      -> FUN_04b560e0         FFXi+0x1060E0   per-row entry
+        -> FUN_04b56100       FFXi+0x106100   the 5-bit tag switch
+
+The parser reads a 5-bit tag then a fixed number of payload bits per tag, and
+writes into the row struct that `befriend_submit` later reads as `rec[]`
+(dword-indexed, so `rec[n]` is struct offset `n*4`):
+
+    tag 0x00 Name        4-bit len + 7-bit chars -> +0x04   rec[1]..
+    tag 0x01 Area        10 bits                 -> +0x28
+    tag 0x02 Nation      2 bits                  -> +0x1C
+    tag 0x03 Job         5 + 5 bits              -> +0x20, +0x21
+    tag 0x04 Level       8 + 8 bits              -> +0x22, +0x23
+    tag 0x05 Race        4 bits                  -> +0x1D
+    tag 0x06 Flags1      16 bits                 -> +0x2A
+    tag 0x08 Id          20 bits                 -> +0x18   rec[6]
+    tag 0x0E Unknown0E   32 bits                 -> +0x14   rec[5]
+    tag 0x10 Rank        8 bits                  -> +0x1E
+    tag 0x11 Comment     32 bits                 -> +0x34
+    tag 0x16 Flags2      32 bits                 -> +0x30
+    tag 0x17 Language    16 bits                 -> +0x2C
+
+`*param_2` (struct +0x00) accumulates a bitmask of which tags were seen:
+bit 0x100 for Id, bit 0x4000 for Unknown0E.
+
+Confirmed against a live `/befriend` capture:
+
+    rec[0]=0x00C1417F  rec[1]=0x61727953  rec[5]=0x00000000  rec[6]=0x00000006
+
+- `rec[1]` = 0x61727953 = "Syra" -- the name, at +0x04.
+- `rec[6]` = 6 -- tag 0x08 Id. LSB's login log confirms charid 6 is that
+  character, so `Id` carries **charid**, not an account id.
+- `rec[5]` = 0 -- tag 0x0E, which LSB hardcodes to 0.
+- `rec[0]` has both 0x100 and 0x4000 set, so the 0x0E field IS transmitted --
+  it just carries zero.
+
+**Correction:** an earlier revision of this document said `rec[6]` held packed
+`(zone, world, lo16)`. It does not; it is the 20-bit charid from tag 0x08.
+
+The fix is therefore to emit the POL account id in `SearchType::Unknown0E`
+(32 bits) rather than the hardcoded 0. `SearchType::Friend` (0x0C) is a red
+herring -- the parser has no case for it and would treat it as an unknown tag.
+
+## Dump procedure: map every section, not just .text
+
+A memory dump is a flat image -- every section's bytes sit at its
+VirtualAddress. `RawPtr` must therefore equal `VirtualAddress` for **all**
+sections. `C:	oolsix_pe_dump.ps1` originally patched only sections whose
+RawPtr/RawSize were zero (in practice just `.text`), leaving `.rdata`, `.data`,
+`POL1` and the rest pointing at the ORIGINAL on-disk offsets. Ghidra then read
+the wrong bytes for every string and global, which is what produced the
+long-standing belief that "code addresses are stable but string/global RVAs
+shift between builds". Code was fine; data was mismapped.
+
+The script now patches any section where `RawPtr != VirtualAddress` or
+`RawSize != VirtualSize`. Validate a fresh dump by comparing bytes against live
+memory before trusting it:
+
+    file[rva]  ==  /rawread/<live_base + rva>
+
+for one address in `.text`, one in `.rdata`, and one in `.data`.

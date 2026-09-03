@@ -571,3 +571,154 @@ callback `befriend_response_callback`.
     `seq` (`body[0xC]`), `sub_id` (`body[0xE]`),
   - look up `account_id_lo` from `chars` table by name,
   - reply with the 48-byte response body per §6.
+
+
+## 7. Initiate vs accept is NOT distinguishable by packet shape
+
+An earlier server implementation keyed the decision on the BefriendExtra
+length -- 176B meant "initiator", 168B + an 8B Finalize meant "acceptor".
+**That is wrong.** A live initiator `/befriend` was captured on 2026-08-26
+sending a 168B Extra *and* an 8B Finalize, i.e. exactly the accept shape:
+
+    C->S Data[0] (304B)      declaration -- filler, see below
+    C->S BefriendExtra (168B)
+    C->S BefriendFinalize (8B)
+
+The consequence was that a brand-new friend request was processed as an
+acceptance of a request that did not exist, so `accept_friend_request` returned
+"No pending request found", no row was ever written to
+`account_friend_requests`, and the client still received a BefriendResponse
+built from garbage -- which polcore wrote to disk as a corrupt message with an
+empty From field and the default (normal) type.
+
+**The 304B declaration is filler on the initiate side.** Captured contents were
+a plain incrementing byte pattern `00 01 02 03 ... c7` then restarting, so any
+field read out of it -- target charname at `[24:39]`, nickname at `[40:55]` --
+is a slice of that pattern, not data. The existing comment claiming the
+declaration is "all-zero on accept" describes only the accept side.
+
+Both flows carry the same field layout in the Extra, so the flow must be
+decided from **server state**, not from the wire:
+
+    pending = SELECT 1 FROM account_friend_requests
+              WHERE accid_from = <other> AND accid_to = <me>
+
+    pending -> this is an acceptance
+    else    -> this is a new request
+
+Length is still used, but only for framing: a 168B Extra is followed by an 8B
+Finalize that must be consumed to keep the stream aligned.
+
+### Where the target account id comes from
+
+The declaration's charname is only usable on the accept side. On an initiate the
+target must come from the account id the client resolved via the search server
+-- see `search-query-path.md`. Until the search server sends a real account id
+in `SearchType::Unknown0E`, that value is 0 and no target can be resolved at
+all. The server logs every 32-bit field of the Extra
+(`BefriendExtra dwords: +0x00=... +0x04=...`) so the carrying offset can be
+pinned from the next capture; `+0x0C` and `+0x10` are the current candidates,
+validated against the `accounts` table before use.
+
+
+## 8. BefriendExtra field map (verified 2026-08-31, end-to-end)
+
+Captured from a working initiate + accept round trip. Offsets are into the
+168-byte BefriendExtra.
+
+| Offset | Size | Initiate                          | Accept                          |
+|--------|------|-----------------------------------|---------------------------------|
+| 0x10   | 2    | target charid (rec[6])            | unrelated value -- do NOT use   |
+| 0x12   | 2    | target account id (rec[5]/acct_hi)| unrelated                       |
+| 0x14   | 4    | 0                                 | notification id being accepted  |
+| 0x18   | 15   | nickname the user typed, NUL-terminated (both flows) |          |
+
+**0x10/0x12 is two u16s, not one dword.** polcore packs `befriend_submit`'s
+rec[6] (charid) into the low half and rec[5] (account id) into the high half.
+Read as a u32 it looks like nonsense -- e.g. 0x03EF0006 for account 1007,
+charid 6.
+
+**0x14 is how you tell the flows apart.** It is 0 on an initiate and echoes the
+notification id of the request being accepted otherwise. That id must therefore
+be **deterministic** server-side (see below), because it is the only reliable
+correlator between an accept and the request it refers to.
+
+Do NOT try to resolve 0x10 as a charid on the accept path as a fallback. That
+field holds something else there, and a lookup can land on a real but WRONG
+account -- observed filing a friend request against an unrelated character.
+
+**0x18 is NUL-TERMINATED, not NUL-padded.** Bytes after the terminator are
+leftover filler from the declaration buffer, so `rstrip(' ')` alone yields the
+name followed by garbage. Split on the first NUL.
+
+## 9. Notification records: a zero token is discarded
+
+`msgrec` entry[0x00..0x07] (token) and [0x14] (msg_id) must be **non-zero**.
+polcore treats a zero token as an empty record and drops it silently -- the
+message is transmitted (the client logs it) but never reaches the inbox and no
+file is written.
+
+`account_friend_requests` has no `id` column (unlike `account_friend_messages`),
+so a naive `row.get('id', 0)` yields 0. The server derives a stable id from
+`(accid_from, accid_to, created_at)` instead. It MUST be deterministic: the same
+pending request is re-sent on every poll, so a fresh id each time would look
+like a new notification every few seconds -- and it is the accept correlator
+(section 8).
+
+## 10. Read state and dedupe
+
+polcore moves a consumed message from `msg/<accid>/r/b/` (unread) to `r/a/`
+(read), and additionally dedupes by token id in memory. Deleting the file on
+disk is NOT enough to make a message reappear -- the in-memory dedupe still
+suppresses it. Only a client restart clears that.
+
+Consequence: if an accept fails mid-flow, the user cannot see the request again
+without relaunching. Worth closing before this is considered robust.
+
+
+## 11. Retail captures: decline sends NOTHING, and our initiate is the wrong shape
+
+Source: `syragon_befriends_hanayaka_hanayaka_declines.json` and
+`syragon_befriends_hanayaka_hanayaka_accepts.json` (retail, profile server on
+port 51220). Note the `..._declines_then_redo_with_accept...` file is byte
+identical to the plain declines capture -- that scenario was never captured.
+
+C->S payload sizes to the profile server:
+
+    ACCEPT capture   17.3s: 304B + 17.5s: 176B          <- initiate
+                     74.6s: 304B + 74.8s: 168B + 8B     <- accept
+    DECLINE capture  85.8s: 304B + 86.1s: 176B          <- initiate
+                     (nothing -- only 408/416B notification polls)
+
+**Declining sends no packet at all.** polcore marks the request message read
+(r/b -> r/a) and writes a type-10 [FNO] into the DECLINER's own sent folder,
+attributed to "unknown" because there is nobody to resolve locally. The
+requester is never told and the request is never cleared. Any server-side
+decline handling is therefore a deliberate DEPARTURE from retail, not an
+implementation of it.
+
+### 176 vs 168 is TCP COALESCING, not a different frame
+
+An earlier revision of this section concluded that retail's 176-byte initiate
+was a different, "request-shaped" structure and that our client was taking a
+different code path. **That is wrong.**
+
+`FUN_10024170` (polcore+0x24170) is the friend SM, and it sends exactly three
+frames:
+
+    case 4:  FUN_1001f970(ctx, 0x130, 0, buf)   ->  304 bytes  (declaration)
+    case 6:  FUN_1001f970(ctx, count * 0xa8, 0, buf)  ->  168 per record
+    case 7:  FUN_1001f970(ctx, 8, 1, buf)       ->    8 bytes  (finalize)
+
+Retail runs this same polcore, so retail sends the same 304 + 168 + 8.
+**176 = 168 + 8** -- the record and finalize landing in one TCP segment. The
+retail accept capture's payload sizes contain 8, 168 AND 176: the initiate
+coalesced, the accept did not. Nothing structural differs.
+
+`0xa8` (168) is the friend-record stride, used throughout the SM as
+`count * 0xa8`, so a 168-byte payload is one friend record.
+
+Consequence: never infer protocol shape from TCP payload boundaries here.
+Frames can merge. This is a second, independent reason the old
+`len(extra) == 168` discriminator was unsound -- beyond the fact that the same
+shape is used by both flows (section 7).

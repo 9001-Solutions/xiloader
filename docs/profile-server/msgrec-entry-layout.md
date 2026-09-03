@@ -17,7 +17,7 @@ semantics.
 | 0x08   | 8    | reserved          | Zero. Skipped from XOR because flag word == 0x0880. |
 | 0x10   | 4    | from_accid        | u32 LE. Sender's account ID.                    |
 | 0x14   | 4    | msg_id            | u32 LE. Server-assigned notification ID.        |
-| 0x18   | 1    | msg_type          | u8. 1=accept, 9=friend-request, 10=decline, etc. (LSBN-compatible codes) |
+| 0x18   | 1    | msg_type          | u8. 1=FWT incoming friend request, 9=FOK request accepted, 10=FNO declined, 0=NRM. (An earlier revision listed 1 and 9 inverted; the authoritative mapping is FFXiMain's type_to_idx -- see inbox-msg-system.md.) |
 | 0x19   | 3    | reserved          | Zero.                                            |
 | 0x1C   | 4    | created_at        | u32 LE. Unix timestamp.                         |
 | 0x20   | 16   | sender_name       | ASCII, null-padded, 15 chars max + null.        |

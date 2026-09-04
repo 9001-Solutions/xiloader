@@ -7016,12 +7016,18 @@ void friend_system::on_tick()
                 constexpr int NOTIF_PICKUP_TICKS = 60 * 30; /* ~30s @ 60Hz */
                 if (++s_notif_pickup_ticks >= NOTIF_PICKUP_TICKS)
                 {
-                    s_notif_pickup_ticks = 0;
-                    if (!s_callerC_active && !s_notif_pickup_active && !s_msgrec_active && !s_whois_active)
+                    if (!s_callerC_active && !s_notif_pickup_active &&
+                        !s_msgrec_active && !s_whois_active &&
+                        !s_friend_status_active)
                     {
-                        /* All slot-0 pumps stomp each other if started concurrently.
-                         * Skip this tick if any pump is in flight -- next 30s
-                         * interval retries. */
+                        /* All slot-0 pumps stomp each other if started
+                         * concurrently, so gate on every other slot-0 user.
+                         * Reset the counter ONLY on a real start: resetting it
+                         * outside this branch costs a full interval for every
+                         * blocked tick, which is how pickup ended up starved
+                         * while WhoIs and friend_status (which hold at the
+                         * threshold and retry next tick) kept running. */
+                        s_notif_pickup_ticks = 0;
                         s_notif_pickup_done_once = false;
                         try_start_notification_pickup();
                     }

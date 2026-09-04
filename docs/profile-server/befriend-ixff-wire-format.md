@@ -2,7 +2,7 @@
 
 Reverse-engineering record of the `/befriend` command path from FFXiMain
 through polcore. All FFXiMain addresses use image base `0x04610000`; RVA =
-addr − base. polcore image base is `0x04580000` for the runtime-unpacked dump
+addr - base. polcore image base is `0x04580000` for the runtime-unpacked dump
 at `re_dumps/polcore_dumped.bin`.
 
 ## 1. Chat handler
@@ -31,10 +31,10 @@ int __cdecl befriend_chat_handler(void* buf, const char* servmes, int id)
 ```
 
 Globals:
-- `token_count` at FFXiMain `0x47C488` — chat-tokenizer output count.
-- `token_ptrs` at FFXiMain `0x3541F0` — array of `char*`; `[0]="/befriend"`, `[1]=target charname`.
-- `target_buf` at FFXiMain `0x47C338` — 16-byte target charname buffer.
-- `sentinel` at FFXiMain `0x47C4B8` — set to 1 after a successful submit; gates the
+- `token_count` at FFXiMain `0x47C488` -- chat-tokenizer output count.
+- `token_ptrs` at FFXiMain `0x3541F0` -- array of `char*`; `[0]="/befriend"`, `[1]=target charname`.
+- `target_buf` at FFXiMain `0x47C338` -- 16-byte target charname buffer.
+- `sentinel` at FFXiMain `0x47C4B8` -- set to 1 after a successful submit; gates the
   cancel-error path in the dialog callback.
 
 ## 2. Dialog confirm + selection
@@ -97,21 +97,21 @@ void __thiscall befriend_submit(void* this, uint32_t* record, uint32_t caller_id
 ```
 
 Record fields consumed by the wire send (not the dead 72-byte copy):
-- `record[5]` (offset 0x14) — account_id high half.
-- `record[6]` (offset 0x18) bits `[15:0]` — account_id low half.
-- `record[6]` bits `[19:16]` — world / realm nibble.
-- `zone` — current character's zone byte from the FFXi character manager.
+- `record[5]` (offset 0x14) -- account_id high half.
+- `record[6]` (offset 0x18) bits `[15:0]` -- account_id low half.
+- `record[6]` bits `[19:16]` -- world / realm nibble.
+- `zone` -- current character's zone byte from the FFXi character manager.
 
 The chain past `befriend_submit`:
 
 ```
 friend_op_send_check_conn @ 0x04707520
-    if DAT_04AEE900 == 0 → return 2 (no friend connection object)
-    → friend_op_increment_seq @ 0x04702350
-        if [conn+0x20] == 0 → return 0x10 (op slot pool not allocated)
-        slot.seq16++; if seq16 == 0 → seq16 = 1
-        → friend_op_fill_slot @ 0x04703880
-            if slot[0x416] != 0 → return 3 (slot busy)
+    if DAT_04AEE900 == 0 -> return 2 (no friend connection object)
+    -> friend_op_increment_seq @ 0x04702350
+        if [conn+0x20] == 0 -> return 0x10 (op slot pool not allocated)
+        slot.seq16++; if seq16 == 0 -> seq16 = 1
+        -> friend_op_fill_slot @ 0x04703880
+            if slot[0x416] != 0 -> return 3 (slot busy)
             populate slot fields:
                 slot[0]      = caller (acct_hi packed)
                 slot[8]      = seq16
@@ -120,8 +120,8 @@ friend_op_send_check_conn @ 0x04707520
                 slot[0x412]  = caller_id  (-> later returned as cb arg0)
                 slot[0x413]  = unused
                 slot[0x416]  = seq16 again (busy marker)
-            → inner_send(&op_table_befriend = 0x04971188)
-                → state_dispatcher(slot, 0) returns 0x16 (init); pump owns the
+            -> inner_send(&op_table_befriend = 0x04971188)
+                -> state_dispatcher(slot, 0) returns 0x16 (init); pump owns the
                   slot from here, returns 0 from inner_send
 ```
 
@@ -139,11 +139,11 @@ entries plus terminator:
 | 0    | 0x04704400 | 0x0F4400 | `friend_op_state_dispatcher` |
 | 1    | 0x047049F0 | 0x0F49F0 | `befriend_op_send`           |
 | 2    | 0x04704840 | 0x0F4840 | `befriend_op_parse_response` |
-| 3    | 0x00000000 | —        | terminator                   |
+| 3    | 0x00000000 | --        | terminator                   |
 
 Slot 0 returns op codes for slot lifecycle:
-state 0 → `0x16` (init), state 1 → `0x17` (advance), state 2 → `6`,
-state 3 → `0`, default → `0x15` (terminal-error).
+state 0 -> `0x16` (init), state 1 -> `0x17` (advance), state 2 -> `6`,
+state 3 -> `0`, default -> `0x15` (terminal-error).
 
 This same table address is hardcoded as the operand of the `PUSH 0x4971188`
 at `0x04703897` inside `friend_op_fill_slot`. The other ~17 op-tables in the
@@ -155,27 +155,27 @@ operations.
 The slot pump is `friend_op_slot_pump @ 0x04702B20`. It indexes
 `slot[0x105C] = table_ptr`, `slot[0x105A] = state_index`, calls
 `table[state_index](slot, advance_flag)`, and routes the return:
-- `0x17` → advance state_index, repeat.
-- `0x16` → wait for tick.
-- terminal value → invoke result callback as
+- `0x17` -> advance state_index, repeat.
+- `0x16` -> wait for tick.
+- terminal value -> invoke result callback as
   `(*slot[0x104C])(slot[0x1048], 0, return_code, slot+8 if return_code != 0 else NULL)`.
 
-The pump is driven from `friend_op_tick @ 0x04701BC0` →
+The pump is driven from `friend_op_tick @ 0x04701BC0` ->
 `friend_op_tick_outer @ 0x047075A0`, called by `FUN_0484B7E0` and
 `FUN_047137C0` in the FFXi main loop.
 
-## 5. Wire send — polcore boundary
+## 5. Wire send -- polcore boundary
 
 `befriend_op_send` calls polcore via the service vtable. The two outbound
 thunks are stack-coupled in cdecl:
 
 ```asm
-PUSH packed         ; → 4th arg of submit
-PUSH 0              ; → 3rd arg
-PUSH account_id_hi  ; → 2nd arg
-CALL [vt+0x33C]     ; polcore_get_seq_id — returns ushort token in EAX
+PUSH packed         ; -> 4th arg of submit
+PUSH 0              ; -> 3rd arg
+PUSH account_id_hi  ; -> 2nd arg
+CALL [vt+0x33C]     ; polcore_get_seq_id -- returns ushort token in EAX
 PUSH EAX            ; token becomes 1st arg (short seq)
-CALL [vt+0x340]     ; polcore_befriend_begin — the real submit
+CALL [vt+0x340]     ; polcore_befriend_begin -- the real submit
 ADD ESP, 0x10       ; cleans 4 dwords (combined call site)
 ```
 
@@ -194,7 +194,7 @@ Polcore service vtable base: `polcore+0x6FBE8` (abs `0x045EFBE8`). Slot map:
 > memo's `0x274` / `0x278`. The earlier offsets were a mis-read of the trampoline
 > `JMP [EAX+disp32]` field.
 
-`vt+0x33C` is **NOT** the submit — it just returns the next seq id (counter
+`vt+0x33C` is **NOT** the submit -- it just returns the next seq id (counter
 initialised at 1000, stored at polcore `0x045F5428`). The real submit is
 `vt+0x340 = polcore_befriend_begin` which receives `(seq, acct_hi, 0, packed)`.
 
@@ -207,7 +207,7 @@ For comparison, the message-send op-tables (e.g., `0x049710C8`) DO go through
 a body-allocator path `vt+0x440` (`polcore+0x1A8E0`) invoked from a builder
 function `FUN_04702EF0`. Befriend never uses that path.
 
-## 5a. polcore submit — `polcore_befriend_begin` (vt+0x340)
+## 5a. polcore submit -- `polcore_befriend_begin` (vt+0x340)
 
 `polcore+0x23050`, signature
 `int polcore_befriend_begin(short seq, uint32_t acct_hi, uint32_t reserved, uint32_t packed)`.
@@ -215,7 +215,7 @@ function `FUN_04702EF0`. Befriend never uses that path.
 Steps:
 
 1. Allocate a free slot from descriptor array `polcore+0x404AD0` (4 slots
-   × stride `0x338`, slot[0]=alloc-flag). On exhaustion: return `-0x1C12`.
+   x stride `0x338`, slot[0]=alloc-flag). On exhaustion: return `-0x1C12`.
 2. Initialise the descriptor via `polcore_init_descriptor` (`polcore+0x1EA00`).
 3. Resolve the body buffer via parallel array `polcore+0x404DF8` indexed by
    `slot * 0xCE` dwords.
@@ -231,9 +231,9 @@ Steps:
 | `0x0F`      | 1    | `0`                              | pad                                 |
 | `0x10..0x17`| 8    | (zero at submit)                 | filled later by header packer       |
 
-5. Set `desc.state = 1`, `desc[0x328] = 6` via `FUN_0459FF20(desc, 6, 0)` —
+5. Set `desc.state = 1`, `desc[0x328] = 6` via `FUN_0459FF20(desc, 6, 0)` --
    initial SM state.
-6. Set `polcore+0x404B90 + slot*0x338 = (seq == 1000 ? 1 : 0)` —
+6. Set `polcore+0x404B90 + slot*0x338 = (seq == 1000 ? 1 : 0)` --
    first-of-session sentinel.
 7. Return slot index (used as opaque handle).
 
@@ -241,18 +241,18 @@ Steps:
 state machine via `polcore_befriend_poll` (vt+0x344, `polcore+0x23330`),
 which forwards to `polcore_befriend_finalize_sm` (`polcore+0x23100`).
 
-## 5b. polcore state machine — `polcore_befriend_finalize_sm`
+## 5b. polcore state machine -- `polcore_befriend_finalize_sm`
 
 Seven-state machine, polled by FFXi via `ixff_poll_response`. Wire-relevant
 transitions:
 
 | State | Address              | Call                                                   | Wire effect                              |
 |-------|----------------------|--------------------------------------------------------|------------------------------------------|
-| 1→2   | `polcore+0x2315D`    | `polcore_connect_sm(desc)`                             | TCP connect to game/map data port        |
-| 2→3   | `polcore+0x23193`    | `polcore_send_ixff_header_sm(desc, 1, 0xB, 0x18)`      | encrypt + send 0x28-byte IXFF header     |
-| 3→4   | `polcore+0x231CE`    | `polcore_send_body_sm(desc, 0x18, 1, body)`            | encrypt + send 24-byte body              |
-| 4→5   | `polcore+0x231FE`    | `polcore_drain_sm(desc)`                               | flush / wait                             |
-| 5→6   | `polcore+0x23239`    | `polcore_recv_body_sm(desc, 0x30, 1, body)`            | receive 48-byte response                 |
+| 1->2   | `polcore+0x2315D`    | `polcore_connect_sm(desc)`                             | TCP connect to game/map data port        |
+| 2->3   | `polcore+0x23193`    | `polcore_send_ixff_header_sm(desc, 1, 0xB, 0x18)`      | encrypt + send 0x28-byte IXFF header     |
+| 3->4   | `polcore+0x231CE`    | `polcore_send_body_sm(desc, 0x18, 1, body)`            | encrypt + send 24-byte body              |
+| 4->5   | `polcore+0x231FE`    | `polcore_drain_sm(desc)`                               | flush / wait                             |
+| 5->6   | `polcore+0x23239`    | `polcore_recv_body_sm(desc, 0x30, 1, body)`            | receive 48-byte response                 |
 | 6     | `polcore+0x23268..`  | parse                                                  | extract result fields, return to FFXi    |
 
 **Wire opcode: class=`1`, opcode=`0x0B`.** Hardcoded as immediate operands at
@@ -283,7 +283,7 @@ hdr[0x18..27] = MD5-truncated digest of (session_token, session_hash[15], desc+0
 If `desc[0x0B] != 0` (BF-enabled flag), the entire header is encrypted
 in-place by `polcore_blowfish_ofb_xform(hdr, hdr, 0x28, desc+0x50, 1)`.
 
-## 5c. Encryption — Blowfish OFB stream
+## 5c. Encryption -- Blowfish OFB stream
 
 `polcore_blowfish_ofb_xform @ polcore+0x63EF0`. Blowfish in OFB-stream mode
 **with newline sentinel preservation**: bytes `0x0A` (LF) and `0x0D` (CR)
@@ -303,22 +303,22 @@ Per-descriptor BF context layout at `desc+0x50`:
 | `+0x60`      | byte counter (re-encrypts every 8 bytes)               |
 | `+0x48`      | sbox memory pointer (4 KB Blowfish S-box)              |
 
-**Key derivation** (per session — see
+**Key derivation** (per session -- see
 `docs/profile-server/pol-bf-key-derivation.md` for the full chain):
 
-1. `polcore_set_session_key(token_ptr, hash_ptr)` `polcore+0x1EA60` —
+1. `polcore_set_session_key(token_ptr, hash_ptr)` `polcore+0x1EA60` --
    entry, called when polcore receives the lobby session response.
-2. → `polcore_derive_session_mask(token_ptr)` `polcore+0x19F20` — builds an
+2. -> `polcore_derive_session_mask(token_ptr)` `polcore+0x19F20` -- builds an
    8-byte mask from the auth token. Same function the Python test server's
    IV derivation was previously ported from. Output stored at
    `polcore+0xAA848` (`DAT_0462A848 / 0462A84C`).
-3. → `polcore_derive_bf_session_key(mask_lo, mask_hi)` `polcore+0x1A1E0` —
-   `MD5(mask, 8) → first 8 bytes`. Stored at `polcore+0xAA8E8`
+3. -> `polcore_derive_bf_session_key(mask_lo, mask_hi)` `polcore+0x1A1E0` --
+   `MD5(mask, 8) -> first 8 bytes`. Stored at `polcore+0xAA8E8`
    (`DAT_0462A8E8 / 0462A8EC`). **This is the Blowfish 8-byte session key.**
 4. Per-connection BF context init in `FUN_04595E80` (HTTP-handshake response
    handler) calls `polcore_init_bf_ctx_with_key(ctx, sbox_mem, key_lo,
    key_hi, iv_ptr)` `polcore+0x63EB0`. Standard Blowfish key schedule in
-   `polcore_blowfish_init_key` `polcore+0x64300` — 4 KB S-box init via the
+   `polcore_blowfish_init_key` `polcore+0x64300` -- 4 KB S-box init via the
    8-byte key, P-array XOR, 521 BF-round mixing pass.
 5. **IV is per-connection**, derived at handshake time from the handshake
    response payload (`*(undefined4 *)**(undefined4 **)(param_1 + 0x39c8)`).
@@ -328,7 +328,7 @@ Per-descriptor BF context layout at `desc+0x50`:
 
 ## 6. Response handling
 
-Befriend (opcode `0x0B`, class `1`) is **synchronous request/response** —
+Befriend (opcode `0x0B`, class `1`) is **synchronous request/response** --
 the response does NOT flow through the polcore notification inbox. Instead,
 `polcore_befriend_finalize_sm` state 6 (`polcore+0x23268..0x232E0`) extracts
 fields directly from `desc.body` and returns them via the poll's
@@ -339,12 +339,12 @@ out-arguments.
 | body offset | size | meaning                                      | FFXi destination                         |
 |-------------|------|----------------------------------------------|------------------------------------------|
 | `0x00..0x07`| 8    | account_id (hashed via `FUN_04599D40`)       | `local_8/uStack_4` in `befriend_op_send` |
-| `0x08..0x0F`| 8    | unused                                       | —                                        |
+| `0x08..0x0F`| 8    | unused                                       | --                                        |
 | `0x10..0x1E`| 15   | nickname                                     | `slot+0x40` (15B name buffer)            |
-| `0x1F`      | 1    | NUL pad                                      | —                                        |
-| `0x20`      | 1    | accept/reject flag (0 = rejected → -0x1C12)  | gates SM return value                    |
+| `0x1F`      | 1    | NUL pad                                      | --                                        |
+| `0x20`      | 1    | accept/reject flag (0 = rejected -> -0x1C12)  | gates SM return value                    |
 | `0x21`      | 1    | status code byte                             | (not consumed)                           |
-| `0x22..0x2F`| 14   | reserved                                     | —                                        |
+| `0x22..0x2F`| 14   | reserved                                     | --                                        |
 
 State 6 logic:
 
@@ -367,11 +367,11 @@ return rc;
 |--------------------|--------------------|-------------------------------------------------|
 | `-0x14CB`          | `8`                | network error from `polcore_connect_sm` etc.    |
 | `-0x1C12`          | `0xB`              | response.body[0x20] == 0 (server rejected)      |
-| other negative     | retry up to 4×     | unreachable on transient errors                 |
+| other negative     | retry up to 4x     | unreachable on transient errors                 |
 | no match in 0x3D polls | `5`            | poll loop timeout                               |
 
 The `(5)` we observe in "Unable to send. (5)" therefore means
-**`polcore_befriend_poll` returned no terminal value within ~61 retries** —
+**`polcore_befriend_poll` returned no terminal value within ~61 retries** --
 the SM is stuck in a non-terminal state. Most likely the connect or
 send-header step failed and the SM is parked, OR the receive never
 completed. To distinguish, instrument polcore SM state transitions.
@@ -411,8 +411,8 @@ The `(N)` placeholder is `result_code`.
 > befriend submit path**. They serve other friend-system features (CallerC
 > notification pickup, friend-list-download response buffering). The friend-
 > list download SM `polcore_friendlist_download_sm @ polcore+0x24170` writes
-> entries into the inbox arrays at `polcore+0xB40D8` (200 × `0x2C`) and
-> `polcore+0xAFC18` (100 × `0x2C`) using **opcode 6 class 2**.
+> entries into the inbox arrays at `polcore+0xB40D8` (200 x `0x2C`) and
+> `polcore+0xAFC18` (100 x `0x2C`) using **opcode 6 class 2**.
 
 ## 7. The 76-byte IXFF capture (port 54002)
 
@@ -422,7 +422,7 @@ Captured during `/befriend chara`:
 4c 00 00 00 49 58 46 46 dd c6 16 89 44 bb 3c a0 13 a8 19 1a 29 f6 47 1d ...
 ```
 
-This **IS** the polcore befriend request from §5b — opcode `0x0B`, class `1`.
+This **IS** the polcore befriend request from section 5b -- opcode `0x0B`, class `1`.
 Wire framing:
 
 ```
@@ -432,16 +432,16 @@ Wire framing:
 [0x48..0x57] = 0x10 bytes            // MD5-truncated tail digest
 ```
 
-Total: `4 + 4 + 0x40 + 0x10 = 0x4C` (76 bytes) — matches the capture. Sent
+Total: `4 + 4 + 0x40 + 0x10 = 0x4C` (76 bytes) -- matches the capture. Sent
 to the LSB map-server data port via the xiloader FFXi relay.
 
 This packet is the **befriend-handshake probe** (the 24-byte body carries
-`(account_id_hi, 0, packed_lo16+world+zone, seq, sub_id)`) — the LSB
+`(account_id_hi, 0, packed_lo16+world+zone, seq, sub_id)`) -- the LSB
 map-server side currently has no handler. To implement, decrypt the
 0x18-byte body with the per-connection BF-OFB session key, parse fields
-per §5a/5b, perform the lookup against the LSB `chars` table (using
+per section 5a/5b, perform the lookup against the LSB `chars` table (using
 `charutils::getAccountIdFromName` or the equivalent), and reply with a
-0x30-byte response body matching §6.
+0x30-byte response body matching section 6.
 
 ## 7a. Relationship to the 304-byte BefriendRequest (profile server, port 51220)
 
@@ -449,9 +449,9 @@ The 76-byte IXFF packet (this section) and the 304-byte BefriendRequest
 captured against the profile server in retail traces are **two distinct
 sends, not the same packet**:
 
-- **76B / opcode 0x0B class 1 / port 54002** — the polcore befriend handshake
-  documented in §5a-§5c. Sent first.
-- **304B BefriendRequest / port 51220** — a separate polcore submit on a
+- **76B / opcode 0x0B class 1 / port 54002** -- the polcore befriend handshake
+  documented in section 5a-section 5c. Sent first.
+- **304B BefriendRequest / port 51220** -- a separate polcore submit on a
   different SM family. Originates from a callback-driven slot system
   initiated by FFXi's chat-helper path (the FFXi op-table at `0x04971188`
   with stub dispatcher); the actual emit fires from a polcore SM whose
@@ -463,7 +463,7 @@ sends, not the same packet**:
 To pin down the 304B emitter, instrument every call site of
 `polcore_send_ixff_header_sm` (`polcore+0x1F4D0`) and log
 `(class, opcode, body_len, dest_port)`. The 304B wire size implies a
-decrypted-body length of approximately `304 - 4 - 4 - 0x28 - 0x10 ≈ 0xC4`
+decrypted-body length of approximately `304 - 4 - 4 - 0x28 - 0x10 ~ 0xC4`
 (196 bytes). Look for any SM that calls `polcore_send_body_sm` with a
 length in that range.
 
@@ -544,10 +544,10 @@ callback `befriend_response_callback`.
 | Address      | RVA       | Role                                                        |
 |--------------|-----------|-------------------------------------------------------------|
 | `0x045EFBE8` | `0x6FBE8` | service vtable base (slots 0x29C/0x2A4/0x31C/0x33C/0x340/0x344) |
-| `0x04984AD0` | `0x404AD0`| descriptor array (4 × `0x338`)                              |
+| `0x04984AD0` | `0x404AD0`| descriptor array (4 x `0x338`)                              |
 | `0x04984DF8` | `0x404DF8`| per-descriptor body buffer pointer table                    |
-| `0x046340D8` | `0xB40D8` | inbox main (200 × `0x2C`)                                   |
-| `0x0462FC18` | `0xAFC18` | inbox alt (100 × `0x2C`)                                    |
+| `0x046340D8` | `0xB40D8` | inbox main (200 x `0x2C`)                                   |
+| `0x0462FC18` | `0xAFC18` | inbox alt (100 x `0x2C`)                                    |
 | `0x0462A8E8` | `0xAA8E8` | derived 8-byte BF session key (post-MD5)                    |
 | `0x04984A88` | `0x404A88`| session token (raw input to mask derivation)                |
 | `0x045F5428` | `0x75428` | seq counter (init 1000), returned by `polcore_get_seq_id`   |
@@ -570,7 +570,7 @@ callback `befriend_response_callback`.
   - extract `account_id_hi` (`body[0]`), packed `(zone, world)` (`body[8]`),
     `seq` (`body[0xC]`), `sub_id` (`body[0xE]`),
   - look up `account_id_lo` from `chars` table by name,
-  - reply with the 48-byte response body per §6.
+  - reply with the 48-byte response body per section 6.
 
 
 ## 7. Initiate vs accept is NOT distinguishable by packet shape
@@ -648,7 +648,7 @@ field holds something else there, and a lookup can land on a real but WRONG
 account -- observed filing a friend request against an unrelated character.
 
 **0x18 is NUL-TERMINATED, not NUL-padded.** Bytes after the terminator are
-leftover filler from the declaration buffer, so `rstrip(' ')` alone yields the
+leftover filler from the declaration buffer, so `rstrip('')` alone yields the
 name followed by garbage. Split on the first NUL.
 
 ## 9. Notification records: a zero token is discarded
@@ -678,8 +678,8 @@ without relaunching. Worth closing before this is considered robust.
 
 ## 11. Retail captures: decline sends NOTHING, and our initiate is the wrong shape
 
-Source: `syragon_befriends_hanayaka_hanayaka_declines.json` and
-`syragon_befriends_hanayaka_hanayaka_accepts.json` (retail, profile server on
+Source: two retail captures of the same request, one declined and one
+accepted (profile server on
 port 51220). Note the `..._declines_then_redo_with_accept...` file is byte
 identical to the plain declines capture -- that scenario was never captured.
 

@@ -1,4 +1,4 @@
-# WhoIs / friend status query — `(4,6,0x18)`
+# WhoIs / friend status query -- `(4,6,0x18)`
 
 The native polcore mechanism for refreshing a single friend's online status
 and name lookup data without re-running the full friend-list pump.
@@ -13,7 +13,7 @@ with their status at that moment. WhoIs is the per-friend update path.
 |-----------|-------------------------------------------------------------------|
 | `+0x1D400`| WhoIs init body. Allocates slot, runs `auth_builder`, calls `setup_connection(slot, conn_type=6, 0)`, zeroes 0x18B buffer at `*(slot+0x328)`. Returns slot index (or negative on failure). |
 | `+0x1D480`| JMP trampoline into `+0x1D400`. The address polcore stores in its function table at slot `+0x304`. |
-| `+0x1D490`| WhoIs driver SM. `int __cdecl(slot_idx)` — pumped until it returns 1 (done). 7 SM states; jump table at `+0x1D7B0..+0x1D7CC`. |
+| `+0x1D490`| WhoIs driver SM. `int __cdecl(slot_idx)` -- pumped until it returns 1 (done). 7 SM states; jump table at `+0x1D7B0..+0x1D7CC`. |
 | `+0x1D7D0`| Driver thunk. 1-arg pass-through to `+0x1D490`. Stored in polcore's function table at slot `+0x308`. |
 
 ## Function-table exposure
@@ -21,8 +21,8 @@ with their status at that moment. WhoIs is the per-friend update path.
 Polcore exposes WhoIs to its consumers through the function-table at
 `polcore+0x6FBE8` (returned by `GetCommonFunctionTable`):
 
-- Slot `+0x304` → `+0x1D480` (init thunk)
-- Slot `+0x308` → `+0x1D7D0` (driver thunk)
+- Slot `+0x304` -> `+0x1D480` (init thunk)
+- Slot `+0x308` -> `+0x1D7D0` (driver thunk)
 
 ## SM cases
 
@@ -36,7 +36,7 @@ Jump table at `+0x1D7B0..+0x1D7CB`:
 | 3    | `+0x1D54F`| Send 0x18B body                                             |
 | 4    | `+0x1D589`| Drain 24B AuthConfirm (`+0x1F690`)                          |
 | 5    | `+0x1D5D7`| Recv 128B with `param_3=1` (CRC-validated). Response buffer at `*(slot+0x328)`. Receives 24B instead of 128B if `slot+0xC8` is non-zero (init zeroes it). |
-| 6    | `+0x1D64D`| Parse 128B response → write 11+ result globals. `result[6]==0` → `+0x7541C = -1` (not found) and `+0x75424 = 4`. Otherwise reads `result[0x76] & 1` (online flag → `+0xAC528`), `result[+4..+8]`, etc. |
+| 6    | `+0x1D64D`| Parse 128B response -> write 11+ result globals. `result[6]==0` -> `+0x7541C = -1` (not found) and `+0x75424 = 4`. Otherwise reads `result[0x76] & 1` (online flag -> `+0xAC528`), `result[+4..+8]`, etc. |
 
 The outer dispatcher at `+0x1D490` calls `slot_validity_check (+0x1EBD0)` on
 every pump. That helper enforces a 10-second cooldown gate at
@@ -45,7 +45,7 @@ dispatcher takes its `JLE` exit without entering the case body.
 
 ## Output globals
 
-Result fields touched by case 6 (per `polcore-audit.md` "Other Globals"):
+Result fields touched by case 6 (polcore globals):
 
 | RVA          | Purpose                                       |
 |--------------|-----------------------------------------------|
@@ -60,7 +60,7 @@ Result fields touched by case 6 (per `polcore-audit.md` "Other Globals"):
 | `+0x75424`   | Count-1                                       |
 | `+0x75428`   | Result word (from result+4)                   |
 
-The status table at `+0x405820` (64 entries × 0x28 stride) holds the
+The status table at `+0x405820` (64 entries x 0x28 stride) holds the
 per-friend cache that `populate_friend_data` (FFXi-side) reads when it
 re-renders flistmai.
 
@@ -82,13 +82,13 @@ while (driver(slot) != 1) {    // polcore+0x1D7D0, pump until status=1
 ## Wire format
 
 ```
-C→S Init           (40B, std)
-S→C ACK            (24B)
-C→S Auth (4,6)     (40B header advertising body=0x18)
-S→C AuthResponse   (40B; standard for this auth class)
-C→S Data[0]        (24B query body)
-S→C AuthConfirm    (24B)
-S→C Status         (124B payload + 4B sum-of-dwords trailer; trailer
+C->S Init           (40B, std)
+S->C ACK            (24B)
+C->S Auth (4,6)     (40B header advertising body=0x18)
+S->C AuthResponse   (40B; standard for this auth class)
+C->S Data[0]        (24B query body)
+S->C AuthConfirm    (24B)
+S->C Status         (124B payload + 4B sum-of-dwords trailer; trailer
                     is validated by polcore_recv_body_sm with param_3=1)
 ```
 

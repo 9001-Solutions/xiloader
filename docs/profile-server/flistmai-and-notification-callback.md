@@ -1,6 +1,6 @@
 # flistmai and Polcore Notification Callback
 
-This documents the FFXi-side friend system state and the polcore↔FFXi notification callback chain. RE'd via static Ghidra analysis of FFXiMain.dll and polcore.dll, cross-verified against live in-game memory via fdiag.
+This documents the FFXi-side friend system state and the polcore<->FFXi notification callback chain. RE'd via static Ghidra analysis of FFXiMain.dll and polcore.dll, cross-verified against live in-game memory via fdiag.
 
 ## Build skew correction (critical)
 
@@ -11,7 +11,7 @@ Two FFXi offsets in `src/friend.cpp` were stale and need updating:
 | `OFF_FLISTMAI_PTR` | `0x62E9E4` | `0x62FB5C` |
 | `OFF_POPULATE_FN`  | `0x1E9830` | `0x1EAC00` |
 
-The stale `0x62E9E4` reads zeros (uninitialized .data), which produced the misleading log line `flistmai = NULL — feature using this will be silent no-op` for months.
+The stale `0x62E9E4` reads zeros (uninitialized .data), which produced the misleading log line `flistmai = NULL -- feature using this will be silent no-op` for months.
 
 ## flistmai object
 
@@ -22,20 +22,20 @@ The stale `0x62E9E4` reads zeros (uninitialized .data), which produced the misle
 | `+0x00` | vtable | `PTR_FUN_04948D78` (= `FFXi+0x338D78`) |
 | `+0x08` | gate field | Read by `FUN_048107C0` to decide whether to close `menu_titlehan` |
 | `+0x50` | slot count | `-1` after ctor; populated to `slots+6` by `populate_friend_data` |
-| `+0x5C` | render array ptr | NULL after ctor; allocated by populate as `(slots+6) × 0x54` bytes |
-| `+0x60` | display array ptr | NULL after ctor; allocated by populate as `(slots+6) × 0x88` bytes |
+| `+0x5C` | render array ptr | NULL after ctor; allocated by populate as `(slots+6) x 0x54` bytes |
+| `+0x60` | display array ptr | NULL after ctor; allocated by populate as `(slots+6) x 0x88` bytes |
 | `+0x84` | color/font handle | Set by `flistmai_menu_open` |
 | `+0x8C` | icon array indirect | Used by `populate_friend_data` |
 | `+0xA4..0xA8` | bucket-hide flags | One byte per category (0..4); 0 = visible |
 
-Live state in our build (probed via fdiag with game running):
+Live state in our build (read from the live process):
 
 | Field | Value | Meaning |
 |---|---|---|
 | flistmai pointer | `0x15BC8AE0` | Allocated |
 | `+0x00` (vtable) | `0x047A8D78` | Matches expected `FFXi_base + 0x338D78` |
 | `+0x08` | `0x00000000` | Gate field unset |
-| `+0x50` | `0xFFFFFFFF` (-1) | Slot count uninitialized — populate_friend_data has NOT run |
+| `+0x50` | `0xFFFFFFFF` (-1) | Slot count uninitialized -- populate_friend_data has NOT run |
 | `+0x5C` | `0x00000000` | Render array not allocated |
 | `+0x60` | `0x00000000` | Display array not allocated |
 
@@ -43,20 +43,20 @@ Live state in our build (probed via fdiag with game running):
 
 ```
 WinMain (FFXi+0x15700)
- └─ FUN_046259D0 (CoInitialize)
-     └─ FUN_04626230
-         └─ FUN_04611520 (window setup, then game-init loop)
-             └─ FUN_04620D20 (state machine)
-                 └─ FUN_047E0CF0 (widget bootstrap, runs once)
-                     └─ flistmai_ctor (FFXi+0x1EAEC0)
-                         ├─ this+0x00 = PTR_FUN_04948D78 (vtable)
-                         ├─ this+0x50 = -1
-                         ├─ allocates 4 sub-objects:
-                         │  ├─ DAT_04C3FB60 (size 0x60, vtable PTR_FUN_04948DE8)
-                         │  ├─ DAT_04C3FB64 (size 0x14, vtable PTR_FUN_04948D30)
-                         │  ├─ DAT_04C3FB68 (size 0x1C, vtable PTR_FUN_04948CE8)
-                         │  └─ DAT_04C3FB6C (size 0x1C, vtable PTR_FUN_04948CA0)
-                         └─ stores result at DAT_04C3FB5C
+ +- FUN_046259D0 (CoInitialize)
+     +- FUN_04626230
+         +- FUN_04611520 (window setup, then game-init loop)
+             +- FUN_04620D20 (state machine)
+                 +- FUN_047E0CF0 (widget bootstrap, runs once)
+                     +- flistmai_ctor (FFXi+0x1EAEC0)
+                         +- this+0x00 = PTR_FUN_04948D78 (vtable)
+                         +- this+0x50 = -1
+                         +- allocates 4 sub-objects:
+                         |  +- DAT_04C3FB60 (size 0x60, vtable PTR_FUN_04948DE8)
+                         |  +- DAT_04C3FB64 (size 0x14, vtable PTR_FUN_04948D30)
+                         |  +- DAT_04C3FB68 (size 0x1C, vtable PTR_FUN_04948CE8)
+                         |  +- DAT_04C3FB6C (size 0x1C, vtable PTR_FUN_04948CA0)
+                         +- stores result at DAT_04C3FB5C
 ```
 
 The widget bootstrap `FUN_047E0CF0` runs unconditionally as part of the FFXi UI init, alongside `chat_obj`, `msg_obj`, all menus, font tables, etc. flistmai is therefore guaranteed allocated by the time the user can input commands.
@@ -70,10 +70,10 @@ The widget bootstrap `FUN_047E0CF0` runs unconditionally as part of the FFXi UI 
 3. Calls `FUN_046F6AC0` to re-sort the friend index (scans 300 slots, rebuilds index at `DAT_04AEE768+0x832`, quicksorts).
 4. Reads `*(short*)(DAT_04AEE768+0x132)` = count of occupied slots.
 5. **Sets `this+0x50 = slots + 6`** (this is the value flip from -1 to a real count; +6 for header/footer rows).
-6. If `this+0x5C == NULL`: allocates render array `operator_new((slots+6) × 0x54)`.
-7. If `this+0x60 == NULL`: allocates display array `operator_new((slots+6) × 0x88)`.
+6. If `this+0x5C == NULL`: allocates render array `operator_new((slots+6) x 0x54)`.
+7. If `this+0x60 == NULL`: allocates display array `operator_new((slots+6) x 0x88)`.
 8. Sets `this+0x54 = 0` (active row counter).
-9. Iterates `slots-1` times, reading entries from `DAT_04AEE768 + 0xA90 + index[i] × 0x100`:
+9. Iterates `slots-1` times, reading entries from `DAT_04AEE768 + 0xA90 + index[i] x 0x100`:
    - Skips if `entry[0x98] & 1 == 0` (occupied bit unset).
    - Categorizes into 5 buckets (0=online, 1=offline, 2=LS members, 3=incoming request, 4=other pending).
    - Inserts category divider rows on first-of-bucket.
@@ -82,7 +82,7 @@ The widget bootstrap `FUN_047E0CF0` runs unconditionally as part of the FFXi UI 
 10. Calls `FUN_04806B50(this+0x5C, this+0x54, 1)` (UI commit).
 11. If zero iterations: writes "No friends" placeholder string.
 
-**Idempotent** — never deallocates buffers; only allocates if NULL. Re-running just refills.
+**Idempotent** -- never deallocates buffers; only allocates if NULL. Re-running just refills.
 
 **Bails-on-empty behavior:** even with zero friends in `DAT_04AEE768`, populate sets `this+0x50 = 6` and allocates buffers. So calling populate with empty Array1 IS safe and DOES initialize flistmai.
 
@@ -102,7 +102,7 @@ Populated by the FFXi friend system state machine (`FUN_04700150`, driven by per
 - State 8: download friend list
 - State 9: write entries to `DAT_04AEE768[0xA90 + i*0x100]` with `entry[0x98] |= 1`
 
-Polcore CallerB pumper (running from xiloader's worker thread in `friend.cpp`) writes to **polcore Array1** (polcore+0x403080), which is a **separate** table. There is no native bridge in FFXi from polcore Array1 to `DAT_04AEE768[]` — the FFXi state machine populates `DAT_04AEE768` independently by speaking to the friend server through its own connection.
+Polcore CallerB pumper (running from xiloader's worker thread in `friend.cpp`) writes to **polcore Array1** (polcore+0x403080), which is a **separate** table. There is no native bridge in FFXi from polcore Array1 to `DAT_04AEE768[]` -- the FFXi state machine populates `DAT_04AEE768` independently by speaking to the friend server through its own connection.
 
 In our build, the FFXi state machine's connect/download likely fails (the profile server doesn't speak the exact protocol the state machine expects, or the connection is misrouted). `DAT_04AEE768` stays empty, and populate produces an empty list.
 
@@ -122,13 +122,13 @@ In our build, the FFXi state machine's connect/download likely fails (the profil
 |---|---|---|
 | Primary callback ptr | `pol+0xAA974` (`DAT_0462A974`) | Function pointer |
 | Secondary callback ptr | `pol+0xAA970` (`DAT_0462A970`) | Function pointer |
-| Queue base | `pol+0xAA980` (`DAT_0462A980`) | 4 entries × 0x40 bytes |
+| Queue base | `pol+0xAA980` (`DAT_0462A980`) | 4 entries x 0x40 bytes |
 | Queue depth | `pol+0xAAA94` (`DAT_0462AA94`) | 0..4 |
 | Dispatch mode | `pol+0xAAA90` (`DAT_0462AA90`) | 0 = enqueue, 1 = direct call |
 | Force-drain flag | `pol+0xAAA84` (`DAT_0462AA84`) | 1 = drain on next Tick |
 | Crypto enable | `pol+0xBCA80` (`DAT_0463CA80`) | 0 = plaintext (our case) |
 
-**Live state confirmation (probed via fdiag):**
+**Live state confirmation (read from the live process):**
 
 | Address | Value | Meaning |
 |---|---|---|
@@ -137,7 +137,7 @@ In our build, the FFXi state machine's connect/download likely fails (the profil
 
 The "FFXi only registers NULL" hypothesis from earlier diagnostic was wrong. FFXi DOES register `display_cb` at startup. Our hook only saw NULL writes because it attached AFTER the initial registration.
 
-`display_cb` (FFXi+0xF2750) is the notification overlay's `add_notif` function — it produces the floating S:/R: pulse on screen.
+`display_cb` (FFXi+0xF2750) is the notification overlay's `add_notif` function -- it produces the floating S:/R: pulse on screen.
 
 ## Callback invocation signature
 
@@ -174,15 +174,15 @@ FUN_045AB900(cb);  // friend-record event sweeper
 ## Polcore tables that types 0/2/3 reference
 
 These are populated by polcore BEFORE the callback fires:
-- `DAT_046340D8` (pol+0xB40D8) — 200 × 0xB0 friend status table
-- `DAT_0497C920` (pol+0x3FC920) — 200 × 0x84 nickname/zone secondary table
-- `DAT_049706C0` (pol+0x3F06C0) — 4 × friend records (0xC26 dwords each)
+- `DAT_046340D8` (pol+0xB40D8) -- 200 x 0xB0 friend status table
+- `DAT_0497C920` (pol+0x3FC920) -- 200 x 0x84 nickname/zone secondary table
+- `DAT_049706C0` (pol+0x3F06C0) -- 4 x friend records (0xC26 dwords each)
 
 ## What display_cb (FFXi+0xF2750) actually does
 
-It dispatches notifications to the on-screen S:/R: overlay (the floating pulse for sent/received messages). It does NOT populate `DAT_04AEE768` or trigger `populate_friend_data`. So even with the callback registered, the friend list state stays as it is — the callback is for visual notification only.
+It dispatches notifications to the on-screen S:/R: overlay (the floating pulse for sent/received messages). It does NOT populate `DAT_04AEE768` or trigger `populate_friend_data`. So even with the callback registered, the friend list state stays as it is -- the callback is for visual notification only.
 
-## Vtable thunk map (FFXi → polcore COM vtable)
+## Vtable thunk map (FFXi -> polcore COM vtable)
 
 Discovered during this investigation. FFXi `0x0491F8XX..0x0491FFXX` range contains thunks of the form `(**(code**)(DAT_04A65A24 + 0xN))()`. Sample of confirmed slots:
 

@@ -23,7 +23,7 @@ Profile server (port 51220) uses XOR-mask encoding for packet headers.
 
 | Byte | Source |
 |------|--------|
-| mask[0] | constant per account (e.g. e48b→0x54, 3a6a→0x28) |
+| mask[0] | constant per account (e.g. e48b->0x54, 3a6a->0x28) |
 | mask[1] | `account_base1 XOR (seq XOR 3)` |
 | mask[2] | `account_base2 XOR opcode` |
 | mask[3] | constant per account |
@@ -31,7 +31,7 @@ Profile server (port 51220) uses XOR-mask encoding for packet headers.
 | mask[5] | varies (low bit flips, mostly 2 values per account) |
 | mask[6:12] | constant per account |
 
-On xiloader (degraded mode), mask is `02 04 05 00 ...` — predictable, functional, not retail.
+On xiloader (degraded mode), mask is `02 04 05 00 ...` -- predictable, functional, not retail.
 
 ## Auth Builder Global Chain
 
@@ -85,8 +85,8 @@ Two instances of the auth-mode setter:
 
 | Instance | RVA | Role | Patch |
 |----------|-----|------|-------|
-| #1 | polcore+0x01E86D | Controls Auth packet building (Auth[0]) | `JNE` → `JMP` |
-| #2 | polcore+0x022BBD | Forces healthy internal mode | `JE` (`74 05`) → `NOP NOP` (`90 90`) |
+| #1 | polcore+0x01E86D | Controls Auth packet building (Auth[0]) | `JNE` -> `JMP` |
+| #2 | polcore+0x022BBD | Forces healthy internal mode | `JE` (`74 05`) -> `NOP NOP` (`90 90`) |
 
 Instance #2 byte pattern:
 
@@ -117,7 +117,7 @@ Instance #2 byte pattern:
 
 ## polConnection XOR Behavior
 
-polConnection (0x68 bytes at pattern-scanned address; `+0x48` → malloc'd 0x1000 buffer) provides XOR key material for `Auth[4:20]`, NOT `Auth[0:4]`.
+polConnection (0x68 bytes at pattern-scanned address; `+0x48` -> malloc'd 0x1000 buffer) provides XOR key material for `Auth[4:20]`, NOT `Auth[0:4]`.
 
 ```
 polConn[0x00:0x04] -> XOR'd into Auth[4:7]
@@ -126,7 +126,7 @@ polConn[0x08:0x0C] -> XOR'd into Auth[12:15]
 polConn[0x0C:0x10] -> XOR'd into Auth[16:19]
 ```
 
-`Auth[0:4]` (mode prefix) is unaffected by polConnection. On xiloader, polConnection is zero — no XOR effect.
+`Auth[0:4]` (mode prefix) is unaffected by polConnection. On xiloader, polConnection is zero -- no XOR effect.
 
 ## AuthConfirm Plaintext Structure
 

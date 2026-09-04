@@ -25,7 +25,6 @@ namespace globals {
     extern uint32_t           g_AccountId;
     extern std::string        g_Username;
     extern char               g_SessionHash[16];
-    extern bool               g_EnablePolPush;
 }
 
 static const char* polcore_module()
@@ -172,7 +171,7 @@ static constexpr uint32_t CONN_KEY_MASK_A = 0x39F8; /* u32 */
 /* Port override read by push SM case 2/3; 0 means use the default 0xC828. */
 static constexpr uint32_t CONN_PORT_OVERRIDE = 0x2A8;
 
-/* OFF unless --pol-push. Driving this SM past state 0x16 has killed the client
+/* Driving this SM past state 0x16 has killed the client
  * three times: the push SM runs concurrently with the friend SMs the worker
  * already pumps, and they share connection-slot state. */
 static bool s_pol_push_enabled = false;
@@ -223,13 +222,6 @@ static uint32_t OFF_FRIEND_STATUS_DRIVER = 0x237F0; /* int __cdecl(slot), return
  * by scanning forward from FRIEND_STATUS_DRIVER for `89 3D <imm32> E9`. */
 static uint32_t OFF_FRIEND_STATUS_DONE   = 0xBCA80;
 
-/* MsgProcess (FFXi+0x200910): scroll-list framework Enter handler. Native path
- * reads event data from caller stack slots that the missing PlayOnline
- * bootstrap leaves uninitialized in private servers. HandleMessageClick
- * bypasses MsgProcess and invokes the event dispatcher at +0x2000B0 with
- * params drawn from msg_obj/globals that ARE populated locally. */
-static uint32_t OFF_MSG_PROCESS       = 0x200910;
-
 /* Filename decoder magic constants (polcore vtable+0x70074, FUN_0459B6D0). The
  * decoder base64-decodes 96 chars -> 72 bytes, then triple-XORs blocks 0/1 with
  * these magics and a session IV at polcore +0xAA848/+0xAA84C. The IV is only
@@ -241,83 +233,15 @@ static constexpr uint32_t POL_FNAME_XOR_HI = 0x1C273E45;
 /* FUN_0480F550 -- friend-system submit. __thiscall(chat_obj, uint8_t* src, uint8_t).
  * Copies 72 bytes from src to chat_obj+0x184, calls FUN_04707520. */
 static uint32_t OFF_FRIEND_SUBMIT     = 0x1FF550;
-/* FUN_0480F450 -- friend-system error callback. Registered by 4 different
- * submit functions. arg3 = result code (0=success, 1=special, else error
- * dispatched via msg_id 0x6F => "Failed to send reply. (NN)"). */
-static uint32_t OFF_FRIEND_ERR_CB     = 0x1FF450;
-/* FUN_04702210 -- friend-system network submit chokepoint. __thiscall, 10 stack
- * args, ret 0x28. Returns 0x10 if `this+0x20` is NULL (no conn). */
-static uint32_t OFF_FRIEND_REAL_SEND  = 0xF2210;
-/* FUN_0480FBB0 -- Reply/Ignore handler for some other menu (op code 0x16).
- * Never fires for the inbox Read action; left hooked for visibility. */
-static uint32_t OFF_DISMISS_SUBMIT     = 0x1FFBB0;
 /* msg_dismiss_action_v2 (FFXi+0x80FFE0) -- inbox menu-action handler.
  * __thiscall(this, menu_group, action_id). menu_group==5 (mes1rcv inbox):
  *   action 1 = Reply (FUN_0480F6F0); 2 = Ignore (FUN_0480FCD0);
  *   action 4 = READ -> friend_dismiss_submit_outer(..., 0x19). */
 static uint32_t OFF_MSG_DISMISS_ACTION = 0x1FFFE0;
-/* friend_dismiss_submit_outer (FFXi+0xF7430) -- Read submit wrapper. Returns 2
- * when conn (DAT_04AEE900) is NULL, else the inner SM status (0 = queued). */
-static uint32_t OFF_DISMISS_OUTER      = 0xF7430;
 /* DAT_04AEE900 (FFXi RVA 0x4DE900) -- friend connection state pointer. NULL
  * causes FUN_04707150 / 04707310 / 04707350 to early-return 2. Resolved at
  * runtime from FRIEND_CONN_TEARDOWN's first instruction imm32. */
 static uint32_t OFF_FRIEND_CONN_STATE  = 0x4DE900;
-/* polcore FUN_0459B6D0 -- filename/entry decoder. Called by vtable+0x48C thunk
- * inside dismiss_op1_send to extract per-entry fields for the match check
- * against dismissal target (type, ts, from_accid, msg_id). */
-static uint32_t OFF_POL_FILENAME_DECODER = 0x1B6D0;  /* thunk; body at +0x1B640 */
-
-/* dismiss_op1_send (FFXi+0xF59D0) -- op[1] of dismiss op_table FFXi+0x361278
- * AND of body-fetch op_table FFXi+0x361268. Body-fetch produces wire traffic;
- * dismiss doesn't. The branch lives inside the polcore vtable+0x1F8 call. */
-static uint32_t OFF_DISMISS_OP1_SEND   = 0xF59D0;
-/* polcore_queue_sm_driver (FFXi+0xF4170) -- shared queue-walking SM driver.
- * __cdecl(self, state, *entry_out, *err_out). case 0 inits + calls
- * polcore_msgq_rescan_trigger via vtable+0xE8C; case 1 yields entries;
- * case 2 closes slot; case 3 status. */
-static uint32_t OFF_POLCORE_QUEUE_SM_DRIVER = 0xF4170;
-/* dismiss_completion_callback (FFXi+0x1FFD60) -- fires when the dismiss SM
- * completes. Sets DAT_04C3FFA0=0, plays sound, sets read flag at
- * DAT_04C3FF94+0x64. */
-static uint32_t OFF_DISMISS_COMPLETION_CB = 0x1FFD60;
-/* dismiss_op2_handler (FFXi+0xF5590) -- op[2] of dismiss op_table 0x361278.
- * Drives FUN_04703F60 file-IO SM (open + read /b/<filename>). Only fires if
- * SM advances state 1->2. */
-static uint32_t OFF_DISMISS_OP2_HANDLER = 0xF5590;
-/* FUN_04707570 -- friend conn TEARDOWN. Sets DAT_04AEE900 = 0. Called from
- * FUN_046275C0 during shutdown phase. Resolved at runtime. */
-static uint32_t OFF_FRIEND_CONN_TEARDOWN = 0xF7570;
-/* FUN_04707550 -- friend conn state initializer. Sets DAT_04AEE900 if NULL,
- * allocs 2 receive slots via FUN_04701A40. Called from FUN_046FFFD0 ->
- * FUN_04713260 -> FUN_047121E0, gated on FUN_046EBD10 && FUN_046EBB30 &&
- * !FUN_046E9240(0). One of those guards fails in the LSB build. */
-static uint32_t OFF_FRIEND_CONN_INIT   = 0xF7550;
-/* FUN_046FFFD0 -- friend system initializer. Allocs DAT_04AEE768 (~86KB),
- * copies account/strings into it, calls FUN_04707550. */
-static uint32_t OFF_FRIEND_SYS_INIT    = 0xEFFD0;
-/* FUN_04703150 -- common inner sender invoked by every submit that registers a
- * callback at +0x104C. __thiscall(this, op_table_ptr), ret 4. Dispatches by
- * the virtual at *op_table[0]: 0x17 retry, 0x16 OK, else fail (0x10). */
-static uint32_t OFF_FRIEND_INNER_SEND = 0xF3150;
-/* FUN_04728A00 -- error/notification message dispatcher.
- * __cdecl(int category, int id) -- looks up + shows message by category+id. */
-static uint32_t OFF_SHOW_ERROR        = 0x118A00;
-/* FUN_04737AA0 -- per-line chat append. __thiscall on the chat log object at
- * [FFXi+0x577150]. Args (msg_str, &flags, 0, 1, 0) -- flags low byte is the
- * channel (MsgProcess uses 0x12). First instruction is a JMP to a polcore
- * thunk; Detours relocates the rel32 so trampoline forwarding is safe. */
-static uint32_t OFF_CHAT_APPEND       = 0x127AA0;
-static constexpr uint32_t OFF_CHAT_LOG_PTR      = 0x577150;
-
-/* FUN_0480FC90 -- opens mes1rcv or mes2frnd sub-menu (vtable[+0x44]). */
-static uint32_t OFF_FC90 = 0x1FFC90;
-
-/* inbox_row_callback (FFXi+0x200420) -- invoked once per inbox row by the
- * friend-system network response handler. param_2 = icon type;
- * param_5 = source_struct pointer. Resolved at runtime; OFF_MSG_OBJ_NATIVE
- * and OFF_INBOX_INIT_DONE both extracted from this function's first 12 bytes. */
-static uint32_t OFF_INBOX_ROW_CALLBACK = 0x200420;
 
 static uint32_t OFF_MSG_OBJ_NATIVE = 0x62FF94;   /* native msg_obj global */
 /* Store 3 container pointer. Resolved at runtime from the entry accessor
@@ -356,35 +280,12 @@ static uint32_t OFF_DISPLAY_CB    = 0xF2750;
 #define OFF_NOTIF_MGR_PTR OFF_FRIEND_CONN_STATE
 static uint32_t OFF_ADD_NOTIF_FN  = 0xF2680;  /* resolved via OFF_DISPLAY_CB anchor */
 
-/* /befriend chat command handler. __cdecl(input_buf, "/servmes", id=0xD).
- * Bails with -id if iRam04a8c488 != 2 (token count must be 2). On success
- * pops a Yes/No confirm dialog; the dialog's callback (FFXi+0x79FE0) then
- * calls into the friend submit chain. */
-static uint32_t OFF_FFXI_BEFRIEND_HANDLER = 0x79F50;
-/* Token count global (iRam04a8c488). Set by get_chat_mode in the dispatcher
- * just before calling the handler. */
-static uint32_t OFF_FFXI_TOKEN_COUNT      = 0x47C488;
-/* Tokenized servmes buffer the handler sees. */
-static constexpr uint32_t OFF_FFXI_SERVMES_BUF      = 0x353DF0;
-/* Token pointer array (PTR_DAT_049641F0). [0]=cmd, [1]=arg1, etc. The handler
- * reads [1] for the target charname. */
-static uint32_t OFF_FFXI_TOKEN_PTRS       = 0x3541F0;
-/* DAT message display function (FUN_04762DD0). __cdecl(category, msg_id, ...).
- * Befriend "Unable to send. (N)" emits with category=10, msg_id=0x70 from
- * befriend_response_callback. Catches every localized message displayed. */
-static uint32_t OFF_FFXI_DAT_MSG_THUNK    = 0x152DD0;
-
 /* Befriend submit (FFXi+0x1FF550 = befriend_submit). Called from the dialog
  * callback or friend-list menu after the user confirms a target. Walks the
  * chain into polcore via vt+0x33C/vt+0x340. If this never fires after
  * /befriend, the chat dialog never selected a target. */
 /* OFF_FFXI_BEFRIEND_SUBMIT -- same function as OFF_FRIEND_SUBMIT; alias kept for clarity. */
 #define OFF_FFXI_BEFRIEND_SUBMIT OFF_FRIEND_SUBMIT
-/* Befriend op-table state-2 callback (FFXi+0xF49F0 = befriend_op_send).
- * __cdecl(slot, advance). Polled by friend_op_slot_pump; emits the polcore
- * submit calls (vt+0x33C/0x340) and reads the response (vt+0x344). Return
- * value becomes result_code passed to befriend_response_callback. */
-static uint32_t OFF_FFXI_BEFRIEND_OP_SEND = 0xF49F0;
 
 /* Native character record initializer (FFXi+0x109D50 = FUN_04709D50).
  * __cdecl, 10 args. Writes param_5 (account_id) to character struct +0x3C388.
@@ -557,9 +458,6 @@ static bool SetAuthMode(const std::string& username)
         maskBase[15 - i] = ~ch;
     }
 
-    xiloader::console::output_to_channel("friend", "SetAuthMode: g_auth_mode=%d, mask='%s'",
-        *s_pAuthMode, username.c_str());
-
     uint8_t* mask20Base = (uint8_t*)(authModeAddr + 0x15);
     std::memcpy(mask20Base, globals::g_SessionHash, 16);
 
@@ -603,8 +501,6 @@ static bool SetFriendServerConfig(const std::string& ip, uint16_t port)
     snprintf(configStr, sizeof(configStr), "%s:%04X", ip.c_str(), port);
     memcpy(configAddr, configStr, strlen(configStr) + 1);
 
-    xiloader::console::output_to_channel("friend", "SetFriendServerConfig: \"%s\"", configStr);
-
     *(volatile DWORD*)((DWORD)hMod + OFF_DONE_FLAG) = 0;
     *(volatile DWORD*)((DWORD)hMod + OFF_INIT_FLAG) = 0;
 
@@ -627,8 +523,6 @@ static bool SetFriendServerSockaddr(const std::string& ip, uint16_t port)
     *(uint16_t*)(addr + 2) = port;
     *(uint32_t*)(addr + 4) = ipBE;
 
-    xiloader::console::output_to_channel("friend",
-        "SetFriendServerSockaddr: %s:%d", ip.c_str(), port);
     return true;
 }
 
@@ -663,7 +557,6 @@ static DWORD WINAPI AuthModeMonitorThread(LPVOID)
 
 static DWORD WINAPI FriendWorkerThread(LPVOID)
 {
-    xiloader::console::output_to_channel("friend", "FriendSys: worker thread started");
 
     while (globals::g_IsRunning)
     {
@@ -671,7 +564,6 @@ static DWORD WINAPI FriendWorkerThread(LPVOID)
         Sleep(16);
     }
 
-    xiloader::console::output_to_channel("friend", "FriendSys: worker thread stopped");
     return 0;
 }
 
@@ -720,80 +612,6 @@ static void PatchPolcoreTitles()
     VirtualProtect(table, STRIDE * COUNT, oldProtect, &oldProtect);
 }
 
-/* Diagnostic: dump polcore's published function table.
- *
- * The POL connection router (pol_msg_router) is latched in its case-0 error
- * state (-0x2C04) because DAT_10099C80 was still 0 on its first tick; a
- * negative state matches no case in its switch, so it can never re-enter.
- * pol_set_conn_config (polcore+0x448C8) is what resets the state AND sets the
- * router mode + host config, but its only Ghidra xref is a false positive from
- * the 0x1043xxxx runtime-code region, so the real entry point has to be found
- * at runtime. GetCommonFunctionTable is polcore's own published surface.
- *
- * Read-only: this walks the table and logs it, it does not call through it. */
-static void dump_polcore_function_table(IPOLCoreCom* polcore)
-{
-    HMODULE hPC = GetModuleHandleA(polcore_module());
-    if (hPC == nullptr || polcore == nullptr)
-        return;
-
-    /* SEH-isolated thunks: __try cannot live in a function that needs C++
-     * object unwinding (C2712), which the logging calls below require. */
-    auto invoke_get_table = [](IPOLCoreCom* pc, unsigned long** out) -> HRESULT {
-        __try {
-            return pc->GetCommonFunctionTable(out);
-        } __except (EXCEPTION_EXECUTE_HANDLER) {
-            return E_FAIL;
-        }
-    };
-    auto safe_read = [](unsigned long* t, int i, uintptr_t* out) -> bool {
-        __try {
-            *out = (uintptr_t)t[i];
-            return true;
-        } __except (EXCEPTION_EXECUTE_HANDLER) {
-            return false;
-        }
-    };
-
-    unsigned long* table = nullptr;
-    HRESULT hr = invoke_get_table(polcore, &table);
-
-    if (FAILED(hr) || table == nullptr)
-    {
-        xiloader::console::output_to_channel("friend",
-            "PolFnTable: GetCommonFunctionTable hr=0x%08X table=%p", (unsigned)hr, table);
-        return;
-    }
-
-    const uintptr_t base = (uintptr_t)hPC;
-    const uintptr_t end  = base + 0x451000;
-
-    xiloader::console::output_to_channel("friend",
-        "PolFnTable: base=0x%08X table=%p", (unsigned)base, table);
-
-    for (int i = 0; i < 256; i++)
-    {
-        uintptr_t v = 0;
-        if (!safe_read(table, i, &v))
-            break;
-        if (v == 0)
-            continue;
-        if (v < base || v >= end)
-            continue;
-
-        const uint32_t rva = (uint32_t)(v - base);
-        const char* tag = "";
-        if (rva == 0x448C8) tag = "  <== pol_set_conn_config";
-        else if (rva == 0x46E50) tag = "  <== set_pp_host";
-        else if (rva == 0x1EAB0) tag = "  <== set_globals_v2";
-        else if (rva == 0x44A50) tag = "  <== pol_msg_router";
-        else if (rva == 0x140E0) tag = "  <== push_sm";
-
-        xiloader::console::output_to_channel("friend",
-            "PolFnTable: [%3d] polcore+0x%05X%s", i, rva, tag);
-    }
-}
-
 static void pol_obfuscate(uint8_t* dst, const uint8_t* plain, int len);
 static bool pol_push_provide_keys(int chan);
 
@@ -826,103 +644,7 @@ static void release_leaked_conn_slots(uint8_t* base)
         if (st != 0x0B && st != 0x0E)
             continue;
         const int rc = release(base, i);
-        xiloader::console::output_to_channel("friend",
-            "PolPush: released leaked conn slot %d (was state=0x%02X flags=0x%02X) rc=%d -> state=0x%02X flags=0x%02X",
-            i, st, fl, rc, *(conn + CONN_STATE), *(conn + CONN_FLAGS));
     }
-}
-
-/* Bring the push channel up BEFORE the friend system initialises.
- *
- * Order matters: with the friend system established first, bringing push up
- * afterwards wedges friend_status permanently for the rest of the session
- * (router state 0x13 runs set_globals_v2, which rewrites shared session
- * crypto). Running push first lets the friend system derive its keys from the
- * post-push state instead of having them invalidated underneath it.
- *
- * Blocking, with a hard cap -- it must never stall world entry. */
-static void bring_up_pol_push_early(uint8_t* base)
-{
-    if (!globals::g_EnablePolPush || base == nullptr)
-        return;
-
-    if (s_polBase == nullptr)
-        s_polBase = base;
-
-    release_leaked_conn_slots(base);
-
-    int32_t* state = (int32_t*)(base + OFF_POL_SM_STATE);
-
-    uint8_t host_plain[] = "127.0.0.1";
-    const int host_len = (int)sizeof(host_plain);
-    uint8_t* hbuf = base + OFF_POL_HOST_BUF;
-    DWORD prot = 0;
-    if (VirtualProtect(hbuf, 0x42, PAGE_READWRITE, &prot))
-    {
-        memset(hbuf, 0, 0x42);
-        pol_obfuscate(hbuf, host_plain, host_len);
-        hbuf[0x41] = (uint8_t)host_len;
-        VirtualProtect(hbuf, 0x42, prot, &prot);
-    }
-
-    DWORD gp = 0;
-    if (VirtualProtect(base + OFF_POL_ROUTER_MODE, 4, PAGE_READWRITE, &gp))
-    {
-        *(uint32_t*)(base + OFF_POL_ROUTER_MODE) = 1;
-        VirtualProtect(base + OFF_POL_ROUTER_MODE, 4, gp, &gp);
-    }
-    *state = 0x12;
-
-    auto step = [](uint8_t* b, int chan) -> int {
-        __try {
-            if (chan < 0)
-            {
-                ((FnPolMsgRouter)(b + OFF_POL_MSG_ROUTER))();
-            }
-            else
-            {
-                auto recv = (FnPolRecvConn)(b + OFF_POL_RECV_CONN);
-                recv(chan);
-            }
-            return 0;
-        } __except (EXCEPTION_EXECUTE_HANDLER) {
-            return -1;
-        }
-    };
-
-    for (int i = 0; i < 400; i++)
-    {
-        if (step(base, -1) != 0)
-        {
-            xiloader::console::output(xiloader::color::error,
-                "PolPush: router raised during early bring-up -- disabling");
-            return;
-        }
-
-        const int chan = (int)*(uint32_t*)(base + OFF_POL_CONN_HANDLE);
-        if (chan >= 0 && chan < 8)
-        {
-            uint8_t* conn = base + OFF_POL_CONN_ARRAY + (uint32_t)chan * POL_CONN_STRIDE;
-            if (*(conn + CONN_STATE) == 5 && *(uint32_t*)(conn + CONN_KEY_BUF) == 0)
-                pol_push_provide_keys(chan);
-            step(base, chan);
-            if (*(conn + CONN_STATE) == 0x0C)
-            {
-                s_seeded = true;
-                s_pol_push_enabled = true;
-                xiloader::console::output(xiloader::color::success,
-                    "PolPush: channel registered before friend init (chan %d, %d steps)", chan, i);
-                return;
-            }
-        }
-        if (*state < 0)
-            break;
-        Sleep(25);
-    }
-
-    xiloader::console::output(xiloader::color::warning,
-        "PolPush: early bring-up did not reach sub-state 0x0C (router=0x%X)", (unsigned)*state);
-    s_seeded = true;
 }
 
 void friend_system::bootstrap(IPOLCoreCom* polcore)
@@ -949,10 +671,6 @@ void friend_system::bootstrap(IPOLCoreCom* polcore)
         _snprintf_s(greet, _TRUNCATE, "PASS acct:%u\r\n",
                     (unsigned)globals::g_AccountId);
 
-        xiloader::console::output_to_channel("friend",
-            "ProfileProxy: identifying push channel as account %u",
-            (unsigned)globals::g_AccountId);
-
         if (xiloader::profile_proxy::start("127.0.0.1",
                                            51222, 51322,
                                            51240, 51340,
@@ -973,7 +691,6 @@ void friend_system::bootstrap(IPOLCoreCom* polcore)
 
     SetFriendServerConfig("127.0.0.1", s_proxyProfilePort);
 
-    dump_polcore_function_table(polcore);
 
     PatchPolcoreTitles();
 
@@ -996,26 +713,11 @@ void friend_system::bootstrap(IPOLCoreCom* polcore)
     if (hPC)
         release_leaked_conn_slots((uint8_t*)hPC);
 
-    /* DO NOT bring the push channel up here.
-     *
-     * Tried 2026-08-23 (bring_up_pol_push_early, kept below for reference):
-     * registering push before the friend system works -- "channel registered
-     * before friend init (chan 0, 6 steps)" -- but the client then never gets
-     * past "Connect: new destination ...:54001" and never reaches the lobby.
-     * polcore's filename IV changes from 0 to 1 across the call, i.e. the
-     * bring-up rewrites session crypto that LOGIN itself depends on. This is
-     * the failure current-status.md documents for calling set_globals_v2
-     * before CoCreateInstance(FFXiEntry); router state 0x13 runs it.
-     *
-     * So the ordering fix trades a broken friend list for a broken login. The
-     * conflict has to be solved by isolating the push channel's session state,
-     * not by resequencing. */
+    /* The push channel must NOT be brought up before login completes.
+     * Its bring-up rewrites polcore's filename IV (0 -> 1), which login
+     * itself depends on; done here the client never reaches the lobby. */
 
-    xiloader::console::output_to_channel("friend",
-        "FriendSys: calling polcore->CreateFriendList()...");
     polcore->CreateFriendList();
-    xiloader::console::output_to_channel("friend",
-        "FriendSys: CreateFriendList() returned");
 
     /* Initialize polcore's friend message-queue. polcore+0x2E850 walks queue
      * slots from polcore+0xBE0F8 (stride 0x228) and sets the ready flag at
@@ -1045,16 +747,12 @@ void friend_system::bootstrap(IPOLCoreCom* polcore)
         }
         else
         {
-            xiloader::console::output_to_channel("friend",
-                "FriendSys: polcore queue init returned, ready=%u", ready_flag);
         }
 
         /* Expected (0, 0) -- polcore inits with NULL accid via FUN_045C4390
          * -> FUN_0459EB00(0,0,0). Non-zero indicates an unknown path set it. */
         uint32_t fn_iv_lo = *(uint32_t*)((uint8_t*)hPC + OFF_POL_IV_LO);
         uint32_t fn_iv_hi = *(uint32_t*)((uint8_t*)hPC + OFF_POL_IV_HI);
-        xiloader::console::output_to_channel("friend",
-            "FriendSys: polcore filename IV = (lo=0x%08X, hi=0x%08X)", fn_iv_lo, fn_iv_hi);
     }
 
     /* Purge stale message files from prior runs -- count_msg_files() otherwise
@@ -1079,8 +777,6 @@ void friend_system::bootstrap(IPOLCoreCom* polcore)
         }
         if (purged > 0)
         {
-            xiloader::console::output_to_channel("friend",
-                "FriendSys: purged %d stale msg files from %s", purged, dir.c_str());
         }
     }
 
@@ -1127,19 +823,9 @@ void friend_system::activate()
             VirtualProtect(nuke_fn, 1, oldProtect, &oldProtect);
         }
 
-        xiloader::console::output_to_channel("friend",
-            "Friend system enabled: gate=1, done_flag=1, sockaddr=127.0.0.1:%d, "
-            "nuke_friend_addr NOP'd",
-            s_FriendPort);
-
         friend_system::init();
         CreateThread(NULL, 0, FriendWorkerThread, NULL, 0, NULL);
     }
-}
-
-bool friend_system::is_active()
-{
-    return s_FriendActive;
 }
 
 void friend_system::on_send(SOCKET s, const char* buf, int len)
@@ -1154,9 +840,6 @@ void friend_system::on_send(SOCKET s, const char* buf, int len)
         char* mbuf = const_cast<char*>(buf);
         memcpy(mbuf + 24, s_befriend_target_charname, 15);
         memcpy(mbuf + 40, s_befriend_target_nickname, 15);
-        xiloader::console::output_to_channel("friend",
-            "FriendSys: injected target '%s' nick='%s' into BefriendRequest",
-            s_befriend_target_charname, s_befriend_target_nickname);
     }
 
 
@@ -1194,8 +877,6 @@ void friend_system::on_send(SOCKET s, const char* buf, int len)
 
             if (mode == 0x33 || mode == 0x28 || mode == 0x2E)
             {
-                xiloader::console::output_to_channel("friend",
-                    "Friend Auth: RETAIL mode 0x%02X", mode);
             }
             else if (mode == 0x02)
             {
@@ -1245,268 +926,6 @@ static int  s_inner_state_snapshot = -1;
 /* Resolved once in STATE_WAITING -> STATE_READY. */
 static uint8_t* s_ffxiBase = nullptr;
 
-/* Bypasses native MsgProcess and calls the event dispatcher at +0x2000B0 with
- * (event_type=5, sub_type=1). Dispatcher reads display params from msg_obj and
- * opens the mes2frnd sub-menu. Invoked from the naked Enter hook. */
-static void __cdecl HandleMessageClick()
-{
-    if (s_ffxiBase == nullptr)
-        return;
-
-    uint32_t msg_ptr = *(uint32_t*)(s_ffxiBase + OFF_MSG_OBJ_NATIVE);
-    if (msg_ptr == 0)
-        return;
-
-    uint8_t* obj = (uint8_t*)(uintptr_t)msg_ptr;
-    uint16_t selected = *(uint16_t*)(obj + 0x24);
-    uint32_t count    = *(uint32_t*)(obj + 0x54);
-
-    xiloader::console::output_to_channel("friend",
-        "HandleMessageClick: msg_obj=0x%08X sel=%u count=%u", msg_ptr, selected, count);
-
-    {
-        uint32_t diag_render = *(uint32_t*)(obj + 0x68);
-        uint32_t diag_data   = *(uint32_t*)(obj + 0x6C);
-        if (diag_render != 0 && diag_data != 0)
-        {
-            for (uint32_t i = 0; i < count && i < 8; i++)
-            {
-                uint8_t* r = (uint8_t*)(uintptr_t)(diag_render + i * 0x54);
-                uint32_t linked_dentry = *(uint32_t*)(r + 0x48);
-                uint32_t arith_dentry  = diag_data + i * 0x50;
-                const char* linked_sender = (linked_dentry != 0)
-                    ? (const char*)(uintptr_t)(linked_dentry + 0x10) : "(null)";
-                const char* arith_sender = (const char*)(uintptr_t)(arith_dentry + 0x10);
-                xiloader::console::output_to_channel("friend",
-                    "  diag row %u: rentry[+0x48]=0x%08X sender='%.16s' | arith[%u]=0x%08X sender='%.16s'",
-                    i, linked_dentry, linked_sender, i, arith_dentry, arith_sender);
-            }
-        }
-    }
-
-    /* msg_obj+0x24 selected is one higher than the actual dentry index, so
-     * valid range is [1..count]. selected==count means dentry[count-1]. */
-    if (selected == 0 || selected > count)
-    {
-        xiloader::console::output(xiloader::color::warning,
-            "  selected(%u) out of range (count=%u), skipping", selected, count);
-        return;
-    }
-
-    uint32_t data_arr   = *(uint32_t*)(obj + 0x6C);
-    uint32_t render_arr = *(uint32_t*)(obj + 0x68);
-    const char* body = nullptr;
-    const char* sender = nullptr;
-    uint32_t dentry_addr = 0;
-    uint32_t dentry_idx = (selected > 0) ? (uint32_t)(selected - 1) : 0;
-
-    if (render_arr != 0 && dentry_idx < 15)
-    {
-        uint8_t* rentry = (uint8_t*)(uintptr_t)(render_arr + dentry_idx * 0x54);
-        dentry_addr = *(uint32_t*)(rentry + 0x48);
-    }
-    /* Fallback: if render_arr lookup failed, compute from data_arr. */
-    if (dentry_addr == 0 && data_arr != 0 && dentry_idx < 15)
-    {
-        dentry_addr = data_arr + dentry_idx * 0x50;
-    }
-
-    if (dentry_addr != 0)
-    {
-        uint8_t* dentry = (uint8_t*)(uintptr_t)dentry_addr;
-        sender = (const char*)(dentry + 0x10);
-        uint32_t body_ptr = *(uint32_t*)(dentry + 0x08);
-        if (body_ptr != 0)
-            body = (const char*)(uintptr_t)body_ptr;
-        xiloader::console::output_to_channel("friend",
-            "  dentry=0x%08X body='%.60s' sender='%.16s'", dentry_addr, body, sender);
-    }
-
-    /* Clear rebuild_flag. Some mes2frnd actions (e.g. Leave Unread) leave it
-     * set, blocking subsequent Enter with "Cannot do that action while
-     * processing another PlayOnline message." */
-    *(uint8_t*)(s_ffxiBase + 0x62FFA0) = 0;
-
-    /* Mirror retail MsgProcess: emit Title/From/Message lines to the chat log
-     * so the user has a persistent record alongside the action menu. */
-    if (dentry_addr != 0 && sender != nullptr)
-    {
-        uint8_t* dentry = (uint8_t*)(uintptr_t)dentry_addr;
-        const char* subj = (const char*)(uintptr_t)*(uint32_t*)(dentry + 0x40);
-        if (subj == nullptr)
-            subj = (const char*)(dentry + 0x10);  /* fall back to sender if no subj ptr */
-
-        uint32_t chat_log_obj = *(uint32_t*)(s_ffxiBase + OFF_CHAT_LOG_PTR);
-        if (chat_log_obj != 0)
-        {
-            typedef bool (__thiscall* FnChatAppend)(void*, const char*, const void*, int, int, int);
-            auto chatAppend = (FnChatAppend)(s_ffxiBase + OFF_CHAT_APPEND);
-            uint16_t flags = 0x0012;   /* chat channel byte; matches MsgProcess */
-            char line[256];
-
-            auto emit = [&](const char* fmt, const char* val) {
-                if (val == nullptr || *val == '\0') return;
-                _snprintf_s(line, sizeof(line), _TRUNCATE, fmt, val);
-                __try { chatAppend((void*)(uintptr_t)chat_log_obj, line, &flags, 0, 1, 0); }
-                __except (EXCEPTION_EXECUTE_HANDLER) {
-                    xiloader::console::output(xiloader::color::error,
-                        "  chatAppend crashed (0x%08X)", GetExceptionCode());
-                }
-            };
-
-            /* Resolve subject via the cached message at the same selected
-             * index. Slot 0 is the help template; messages occupy 1..N. */
-            char subj_buf[16] = {};
-            int idx = (int)((uintptr_t)dentry_addr - (uintptr_t)*(uint32_t*)(obj + 0x6C)) / 0x50;
-            if (idx >= 0 && idx < (int)s_cached_messages.size() + 1)
-            {
-                int cache_idx = idx - 1;
-                if (cache_idx >= 0 && cache_idx < (int)s_cached_messages.size())
-                {
-                    const NotifMessage& nm = s_cached_messages[cache_idx];
-                    emit("Title: %s", nm.subject);
-                    emit("From: %s",  nm.sender);
-                    emit("Message: %s", nm.body);
-                }
-                else
-                {
-                    emit("From: %s", sender);
-                    emit("Message: %s", body ? body : "");
-                }
-            }
-            else
-            {
-                emit("From: %s", sender);
-                emit("Message: %s", body ? body : "");
-            }
-            xiloader::console::output_to_channel("friend",
-                "  chat log printed (idx=%d, sender='%.16s')", idx, sender);
-        }
-        else
-        {
-            xiloader::console::output(xiloader::color::warning,
-                "  chat log obj null (FFXi+0x%X)", OFF_CHAT_LOG_PTR);
-        }
-    }
-
-    /* Emulate retail MsgProcess Enter path: on action==1 it calls FFXi+0x1FFC90
-     * on the event_handler at [+0x62FF9C], which copies 72 bytes from arg3 into
-     * event_handler+0x20..+0x67 and invokes vt[+0x44] to show_menu("mes2frnd").
-     * dentry layout matches retail's arg3 (sender at +0x10, 16B ASCII), so
-     * passing dentry copies the sender into event_handler+0x30 where the
-     * accept-flow nickname input reads its default. */
-    uint32_t event_handler_ptr = *(uint32_t*)(s_ffxiBase + 0x62FF9C);
-
-    if (event_handler_ptr == 0 || dentry_addr == 0)
-    {
-        xiloader::console::output(xiloader::color::warning,
-            "  event_handler=0x%08X dentry=0x%08X -- falling back to plain show_menu",
-            event_handler_ptr, dentry_addr);
-        typedef void (__thiscall* FnShowMenu)(void* wm, const char* name, int, int);
-        auto showMenu = (FnShowMenu)(s_ffxiBase + 0x15E1E0);
-        void* wm = (void*)(s_ffxiBase + 0x5EDD10);
-        const char* mes2frnd = (const char*)(s_ffxiBase + 0x3841F4);
-        __try { showMenu(wm, mes2frnd, 1, 0); } __except (EXCEPTION_EXECUTE_HANDLER) {}
-    }
-    else
-    {
-        /* Call +0x1FFC90(event_handler, dentry[0], dentry[4], dentry_ptr, type_code).
-         * 5th arg is the normalized message type from FUN_048105D0 (raw 0->0
-         * NRM, 1->1, 9->2 FOK, 10->3 FNO, ...), stored at event_handler+0x14
-         * (menu SM cursor). Passing the dentry index here advances mes2frnd
-         * straight into a sub-state; type_code keeps it at the initial
-         * Reply/Ignore/Leave Unread/Exit prompt. */
-        uint32_t type_code = 0;
-        {
-            int idx = (int)((uintptr_t)dentry_addr - (uintptr_t)*(uint32_t*)(obj + 0x6C)) / 0x50;
-            int cache_idx = idx - 1;
-            if (cache_idx >= 0 && cache_idx < (int)s_cached_messages.size())
-            {
-                uint8_t mt = s_cached_messages[cache_idx].msg_type;
-                /* Mirror FUN_048105D0 for the values we use. */
-                switch (mt) {
-                    case 0:  type_code = 0; break;
-                    case 1:  type_code = 1; break;
-                    case 9:  type_code = 2; break;
-                    case 10: type_code = 3; break;
-                    default: type_code = 0; break;
-                }
-            }
-        }
-        typedef void (__thiscall* FnHandleEvent)(void*, uint32_t, uint32_t, uint32_t, uint32_t);
-        auto handleEvent = (FnHandleEvent)(s_ffxiBase + 0x1FFC90);
-        uint32_t arg1 = *(uint32_t*)(uintptr_t)dentry_addr;
-        uint32_t arg2 = *(uint32_t*)(uintptr_t)(dentry_addr + 4);
-        __try
-        {
-            handleEvent((void*)(uintptr_t)event_handler_ptr, arg1, arg2, dentry_addr, type_code);
-            xiloader::console::output_to_channel("friend",
-                "  +0x1FFC90(event_handler, 0x%08X, 0x%08X, dentry=0x%08X, type=%u) returned OK",
-                arg1, arg2, dentry_addr, type_code);
-        }
-        __except (EXCEPTION_EXECUTE_HANDLER)
-        {
-            xiloader::console::output(xiloader::color::error,
-                "  +0x1FFC90 crashed (0x%08X)", GetExceptionCode());
-        }
-    }
-}
-
-/* Accept op_table entries (FFXi+0x361220). Each is a state-machine method
- * `fn(this, arg)`; one is registered at friend_mgr+0x1050 and polled by the
- * FFXi per-frame loop. */
-struct AcceptOpHookSlot {
-    uint32_t rva;
-    const char* tag;
-    void* real;
-};
-static AcceptOpHookSlot s_accept_op_hooks[] = {
-    { 0xF4400, "op[0] state-dispatcher", nullptr },
-    { 0xF5AD0, "op[1]",                  nullptr },
-    { 0xF5660, "op[2]",                  nullptr },
-    { 0xF4750, "op[3]",                  nullptr },
-    { 0xF4BB0, "op[4]",                  nullptr },
-    { 0xF4EC0, "op[5]",                  nullptr },
-    { 0xF4F00, "op[6]",                  nullptr },
-    { 0xF5000, "op[7]",                  nullptr },
-};
-typedef int (__cdecl* FnAcceptOp)(uint32_t, uint32_t, uint32_t, uint32_t);
-/* Per-slot trampolines so each hooks a distinct address. */
-#define ACCEPT_OP_TRAMP(N) \
-    static int __cdecl Mine_AcceptOp_##N(uint32_t a1, uint32_t a2, uint32_t a3, uint32_t a4) { \
-        int r = ((FnAcceptOp)s_accept_op_hooks[N].real)(a1, a2, a3, a4); \
-        xiloader::console::output_to_channel("friend", \
-            "AcceptOp[%d %s]: a1=0x%08X a2=0x%08X -> %d (0x%X)", \
-            N, s_accept_op_hooks[N].tag, a1, a2, r, r); \
-        return r; \
-    }
-ACCEPT_OP_TRAMP(0) ACCEPT_OP_TRAMP(1) ACCEPT_OP_TRAMP(2) ACCEPT_OP_TRAMP(3)
-ACCEPT_OP_TRAMP(4) ACCEPT_OP_TRAMP(5) ACCEPT_OP_TRAMP(6) ACCEPT_OP_TRAMP(7)
-#undef ACCEPT_OP_TRAMP
-
-/* Polcore slot allocator (FUN_0459EBA0). Returns slot index (0..3) or negative. */
-static uint32_t OFF_POL_SLOT_ALLOC = 0x1EBA0;
-
-/* Polcore registrar (FUN_0459FF20). Per-op init's final call: binds op_type
- * (desc+0x323) and timeout (desc+0x326). __cdecl(desc, op_type, timeout). */
-static uint32_t OFF_POL_REGISTRAR  = 0x1FF20;
-
-/* Polcore pumper-gate hook (FUN_0459EBD0). Every per-slot pumper enters here
- * to check active+timeout. __cdecl(char* desc, int slot). Pumper RVA map:
- *   0x1DB90 (4,5) CallerA keepalive    0x1E5D0 (4,7) CallerC notif pickup
- *   0x22260 (1,3) CallerB flist bulk    0x23100 (1,B) ShortAuth
- *   0x24170 (2,6) BefriendRequest      0x27250 (3,2) Confirmation
- *   0x20BB0 (5,4) accept-class         0x210E0 (5,3) accept-class */
-static uint32_t OFF_POL_PUMP_GATE = 0x1EBD0;
-
-/* Polcore notification queue enqueuer FUN_0459C570 -- type-3/4/5/6 enqueue
- * chokepoint. __cdecl(uint32_t type, void* data, int len). */
-static uint32_t OFF_POL_NOTIF_ENQUEUE = 0x1C570;
-
-/* Polcore notification callback registrar FUN_0459B500 -- sets DAT_0462A974,
- * the callback that FUN_0459C600 dispatches queue entries to. */
-static uint32_t OFF_POL_NOTIF_CB_REG = 0x1B500;
-
 /* Real handler for polcore's status-change notification slot (pol+0xAA974).
  *
  * status_update_dispatch (polcore+0x1B71C) decodes every pushed status record
@@ -1529,65 +948,6 @@ static void __cdecl Mine_PolStatusNotify(int opcode, void* data)
     s_resync_pending = true;
 }
 
-/* Polcore body-fetch driver FUN_045A7550 -- fires on click-to-read body
- * fetch. __cdecl(int slot). */
-static uint32_t OFF_POL_BODY_FETCH_DRIVER = 0x27550;
-
-
-/* /befriend chat command handler hook (FFXi+0x79F50). Logs the token count
- * (iRam04a8c488), the servmes buffer, and the token pointers. The handler
- * bails to "Unable to send. (5)" when token count != 2. */
-typedef int (__cdecl* FnBefriendHandler)(void* buf, const char* servmes, int id);
-static FnBefriendHandler Real_BefriendHandler = nullptr;
-static int __cdecl Mine_BefriendHandler(void* buf, const char* servmes, int id)
-{
-    uint32_t token_count = 0;
-    char servmes_buf[64] = {};
-    char tok0[32] = {}, tok1[32] = {};
-    __try {
-        token_count = *(uint32_t*)(s_ffxiBase + OFF_FFXI_TOKEN_COUNT);
-        const char* sm = (const char*)(s_ffxiBase + OFF_FFXI_SERVMES_BUF);
-        for (int i = 0; i < 63 && sm[i]; i++) servmes_buf[i] = sm[i];
-        const char** tp = (const char**)(s_ffxiBase + OFF_FFXI_TOKEN_PTRS);
-        if (tp[0]) for (int i = 0; i < 31 && tp[0][i]; i++) tok0[i] = tp[0][i];
-        if (tp[1]) for (int i = 0; i < 31 && tp[1][i]; i++) tok1[i] = tp[1][i];
-    } __except (EXCEPTION_EXECUTE_HANDLER) {}
-
-    xiloader::console::output_to_channel("friend",
-        "BefriendHandler: id=0x%X token_count=%u servmes='%s' tok[0]='%s' tok[1]='%s'",
-        id, token_count, servmes_buf, tok0, tok1);
-
-    int r = Real_BefriendHandler ? Real_BefriendHandler(buf, servmes, id) : -id;
-    xiloader::console::output_to_channel("friend",
-        "BefriendHandler: returned %d (0x%X)", r, r);
-    return r;
-}
-
-/* befriend_submit (FFXi+0xFF550). __thiscall(this, record_ptr, caller_id).
- * Called by befriend_dialog_callback (caller_id=1) and befriend_dispatch_caller
- * (caller_id=0) after target selection. If this fires, the dialog DID select
- * a target. If we see the chain go through here, downstream polcore SM is
- * the next thing to investigate. */
-typedef void (__thiscall* FnBefriendSubmit)(void* self, uint32_t* record, uint32_t caller_id);
-static FnBefriendSubmit Real_BefriendSubmit = nullptr;
-static void __fastcall Mine_BefriendSubmit(void* self, void* /*edx*/,
-                                           uint32_t* record, uint32_t caller_id)
-{
-    uint32_t r5 = 0, r6 = 0, r0 = 0, r1 = 0;
-    __try {
-        if (record) {
-            r0 = record[0];
-            r1 = record[1];
-            r5 = record[5];
-            r6 = record[6];
-        }
-    } __except (EXCEPTION_EXECUTE_HANDLER) {}
-    xiloader::console::output_to_channel("friend",
-        "BefriendSubmit: this=0x%08X caller_id=%u rec[0]=0x%08X rec[1]=0x%08X rec[5]=0x%08X rec[6]=0x%08X",
-        (uint32_t)(uintptr_t)self, caller_id, r0, r1, r5, r6);
-    if (Real_BefriendSubmit) Real_BefriendSubmit(self, record, caller_id);
-}
-
 /* character_record_init hook (FUN_04709D50). Substitutes g_AccountId for the
  * placeholder value when FFXi populates its character struct from POL XML.
  * Without this, [DAT_04AEED90 + 0x3C388] gets a placeholder (1) because the
@@ -1595,210 +955,12 @@ static void __fastcall Mine_BefriendSubmit(void* self, void* /*edx*/,
 typedef int (__cdecl* FnCharRecordInit)(uint32_t a1, uint32_t a2, uint32_t a3, uint32_t a4,
     uint32_t a5, uint32_t a6, uint32_t a7, uint32_t a8, uint32_t a9, uint32_t a10);
 static FnCharRecordInit Real_CharRecordInit = nullptr;
-static int s_char_init_log_count = 0;
 static int __cdecl Mine_CharRecordInit(uint32_t a1, uint32_t a2, uint32_t a3, uint32_t a4,
     uint32_t a5, uint32_t a6, uint32_t a7, uint32_t a8, uint32_t a9, uint32_t a10)
 {
-    /* a5 is the account_id parameter that gets written to +0x3C388 inside the
-     * function. If POL bypass left it as the placeholder, override with our
-     * known account_id from the auth handshake. */
-    uint32_t orig = a5;
     if (globals::g_AccountId != 0 && (a5 == 0 || a5 == 1))
-    {
         a5 = globals::g_AccountId;
-    }
-
-    if (s_char_init_log_count < 4)
-    {
-        s_char_init_log_count++;
-        char name[17] = {};
-        if (a6) {
-            __try {
-                for (int i = 0; i < 16 && ((const char*)a6)[i]; i++) name[i] = ((const char*)a6)[i];
-            } __except (EXCEPTION_EXECUTE_HANDLER) {}
-        }
-        xiloader::console::output_to_channel("friend",
-            "CharRecordInit[%d]: idx=%u acct=%u->%u name='%s'",
-            s_char_init_log_count, a1, orig, a5, name);
-    }
-
     return Real_CharRecordInit ? Real_CharRecordInit(a1, a2, a3, a4, a5, a6, a7, a8, a9, a10) : 0;
-}
-
-/* befriend_op_send (FFXi+0xF49F0). State-2 callback in op-table 0x04971188.
- * Calling convention: __cdecl(slot, advance) -- both args read from stack;
- * function ends with bare RET (caller-clean). DO NOT use __thiscall here:
- * the function-pointer table dispatch in friend_op_slot_pump invokes it
- * via cdecl (PUSH advance, PUSH slot, CALL [tbl]).
- * Return value: 0 = continue, 0x16 = wait, 0x17 = advance state, terminal
- * (5/8/0xB/etc) = error code passed to befriend_response_callback. */
-typedef uint32_t (__cdecl* FnBefriendOpSend)(void* slot, uint32_t advance);
-static FnBefriendOpSend Real_BefriendOpSend = nullptr;
-static int s_op_send_log_count = 0;
-static uint32_t __cdecl Mine_BefriendOpSend(void* slot, uint32_t advance)
-{
-    uint32_t r = Real_BefriendOpSend ? Real_BefriendOpSend(slot, advance) : 0xFFFFFFFF;
-    /* Log terminal states (non-0x16, non-0x17, non-0) and the first few
-     * polls so we can see SM lifecycle without flooding. Dump the slot's
-     * befriend identity fields so we know what target FFXi is submitting. */
-    bool terminal = (r != 0 && r != 0x16 && r != 0x17);
-    if (terminal || s_op_send_log_count < 4) {
-        s_op_send_log_count++;
-        uint8_t  retry  = 0;
-        uint16_t pollct = 0;
-        uint32_t acct_hi = 0, packed = 0, handle = 0;
-        __try {
-            retry   = *(uint8_t*) ((uint8_t*)slot + 0x12);
-            pollct  = *(uint16_t*)((uint8_t*)slot + 0x10);
-            handle  = *(uint32_t*)((uint8_t*)slot + 0xC);
-            acct_hi = *(uint32_t*)((uint8_t*)slot + 0x38);
-            packed  = *(uint32_t*)((uint8_t*)slot + 0x3C);
-        } __except (EXCEPTION_EXECUTE_HANDLER) {}
-        xiloader::console::output_to_channel("friend",
-            "BefriendOpSend[%d]: slot=0x%08X advance=%u -> 0x%X%s "
-            "| acct_hi=0x%08X packed=0x%08X handle=0x%08X retry=%u poll=%u",
-            s_op_send_log_count, (uint32_t)(uintptr_t)slot, advance, r,
-            terminal ? " (TERMINAL)" : "",
-            acct_hi, packed, handle, retry, pollct);
-    }
-    return r;
-}
-
-/* polcore_send_body_sm hook (polcore+0x1F970). __cdecl(desc, size, type,
- * body_ptr). Sub-state machine for the body-send phase (4 sub-states:
- * setup -> encrypt -> send -> poll). Log on first sub-state (state 0) so we
- * see the body just before encryption.
- *
- * Sizes we care about:
- *   0x018 (24B)  -- befriend handshake body
- *   0x1A0 (416B) -- NotificationPickup body (CallerC notification SM) */
-static uint32_t OFF_POL_SEND_BODY_SM = 0x1F970;
-typedef int (__cdecl* FnPolSendBodySm)(void* desc, uint32_t size, uint32_t type, void* body);
-static FnPolSendBodySm Real_PolSendBodySm = nullptr;
-static int __cdecl Mine_PolSendBodySm(void* desc, uint32_t size, uint32_t type, void* body)
-{
-    if (body == nullptr) {
-        return Real_PolSendBodySm ? Real_PolSendBodySm(desc, size, type, body) : 0;
-    }
-
-    uint8_t state = 0xFF;
-    __try { state = *(uint8_t*)((uint8_t*)desc + 0x9); }
-    __except (EXCEPTION_EXECUTE_HANDLER) {}
-
-    (void)state;
-    return Real_PolSendBodySm ? Real_PolSendBodySm(desc, size, type, body) : 0;
-}
-
-/* Befriend submit outer (FFXi+0xF6FD0 = FUN_04706FD0). Gates on DAT_04AEE900;
- * forwards to FUN_047021B0 -> FUN_04703560 -> inner_send(op_table 0x1010F4).
- * Called by the /befriend chat handler with op_code=0x13. */
-static uint32_t OFF_FFXI_BEFRIEND_OUTER = 0xF6FD0;
-typedef uint32_t (__cdecl* FnBefriendOuter)(uint32_t a1, uint32_t a2, uint32_t a3, uint32_t a4,
-    uint32_t a5, uint32_t a6, uint32_t a7, uint32_t a8, uint32_t a9);
-static FnBefriendOuter Real_BefriendOuter = nullptr;
-static uint32_t __cdecl Mine_BefriendOuter(uint32_t a1, uint32_t a2, uint32_t a3, uint32_t a4,
-    uint32_t a5, uint32_t a6, uint32_t a7, uint32_t a8, uint32_t a9)
-{
-    void* ret_ip = _ReturnAddress();
-    uint32_t ret_rva = (uint32_t)((uintptr_t)ret_ip - (uintptr_t)s_ffxiBase);
-    uint32_t conn = s_ffxiBase ? *(uint32_t*)(s_ffxiBase + OFF_FRIEND_CONN_STATE) : 0;
-    xiloader::console::output_to_channel("friend",
-        "BefriendOuter: caller=FFXi+0x%X conn=0x%08X args=[%08X %08X %08X %08X %08X %08X %08X %08X %08X]",
-        ret_rva, conn, a1, a2, a3, a4, a5, a6, a7, a8, a9);
-    uint32_t r = Real_BefriendOuter ? Real_BefriendOuter(a1, a2, a3, a4, a5, a6, a7, a8, a9) : 0xFF;
-    xiloader::console::output_to_channel("friend",
-        "BefriendOuter: returned %u (0x%X)", r, r);
-    return r;
-}
-
-/* Befriend op_table submit (FFXi+0xF3560 = FUN_04703560). Inner submit:
- * checks busy flag at self+0x416, calls FUN_04702EF0 to alloc the BefriendRequest
- * payload buffer (returns 0x10 if malloc fails), then calls inner_send with
- * op_table 0x1010F4. */
-static uint32_t OFF_FFXI_BEFRIEND_INNER = 0xF3560;
-typedef uint32_t (__thiscall* FnBefriendInner)(void* self, uint32_t seq, uint16_t flag,
-    void* charname_ptr, uint32_t a4, uint32_t a5, uint32_t a6, uint32_t a7, int a8, int a9,
-    uint32_t a10, uint32_t a11);
-static FnBefriendInner Real_BefriendInner = nullptr;
-static uint32_t __fastcall Mine_BefriendInner(void* self, void* /*edx*/, uint32_t seq, uint16_t flag,
-    void* charname_ptr, uint32_t a4, uint32_t a5, uint32_t a6, uint32_t a7, int a8, int a9,
-    uint32_t a10, uint32_t a11)
-{
-    uint16_t busy = 0;
-    char target[16] = {};
-    __try {
-        busy = *(uint16_t*)((uint8_t*)self + 0x416 * 4);
-        if (charname_ptr)
-            memcpy(target, charname_ptr, 15);
-    } __except (EXCEPTION_EXECUTE_HANDLER) {}
-    xiloader::console::output_to_channel("friend",
-        "BefriendInner: this=0x%08X busy=%u target='%s' flag=0x%X a8=%d a9=%d",
-        (uint32_t)(uintptr_t)self, busy, target, flag, a8, a9);
-    uint32_t r = Real_BefriendInner
-        ? Real_BefriendInner(self, seq, flag, charname_ptr, a4, a5, a6, a7, a8, a9, a10, a11)
-        : 0xFF;
-    xiloader::console::output_to_channel("friend",
-        "BefriendInner: returned %u (0x%X)", r, r);
-    return r;
-}
-
-/* Polcore BefriendRequest driver (polcore+0x24170). Per-slot pumper for the
- * 14-mode befriend state machine: TCP connect -> auth (2,6) -> send 0x130-byte
- * BefriendRequest -> recv response -> parse 0xA8-stride friend records -> close.
- * Native per-frame pump dispatches into this when desc[+0x322]=2,
- * desc[+0x324]=6 matches. If no PolBefriendDriver entry appears in the log
- * after /befriend is typed, the per-frame pump never fired for this slot. */
-static uint32_t OFF_POL_BEFRIEND_DRIVER = 0x24170;
-
-/* FUN_0459EEB0(record, friend_table_entry, is_new) -- central insert/update
- * for polcore friend table at +0xB40D8. Writes record to entry+0xA0 (15B
- * name) plus flag bits.
- *
- * FUN_045A3CF0(table_flag, index, op) -- bitmap manager for friend-slot
- * occupancy at DAT_0463CA58. op=1 set, op=0 clear, op=2 read. */
-static uint32_t OFF_POL_FRIEND_INSERTER = 0x1EEB0;
-static uint32_t OFF_POL_BITMAP_OP       = 0x23CF0;
-
-/* polcore_slot_teardown FUN_0459FBD0 -- called at the end of every slot op
- * with the result code (1 = success, negative = error). */
-static uint32_t OFF_POL_SLOT_TEARDOWN = 0x1FBD0;
-
-static bool send_acpt_request(const char* target_charname, const char* nickname);
-
-/* FUN_04707550 hook -- DAT_04AEE900 setter. */
-typedef uint32_t (__cdecl* FnFriendConnInit)(void);
-static FnFriendConnInit Real_FriendConnInit = nullptr;
-static uint32_t __cdecl Mine_FriendConnInit(void)
-{
-    uint32_t before = s_ffxiBase ? *(uint32_t*)(s_ffxiBase + OFF_FRIEND_CONN_STATE) : 0;
-    void* ret_ip = _ReturnAddress();
-    uint32_t ret_rva = s_ffxiBase ? (uint32_t)((uintptr_t)ret_ip - (uintptr_t)s_ffxiBase) : 0;
-    xiloader::console::output_to_channel("friend",
-        "FriendConnInit (FUN_04707550): caller=FFXi+0x%X DAT_04AEE900 before=0x%08X",
-        ret_rva, before);
-    uint32_t r = Real_FriendConnInit ? Real_FriendConnInit() : 0;
-    uint32_t after = s_ffxiBase ? *(uint32_t*)(s_ffxiBase + OFF_FRIEND_CONN_STATE) : 0;
-    xiloader::console::output_to_channel("friend",
-        "FriendConnInit returned %u, DAT_04AEE900 after=0x%08X", r, after);
-    return r;
-}
-
-/* FUN_04707570 hook -- friend conn teardown (clears DAT_04AEE900). */
-typedef uint8_t (__cdecl* FnFriendConnTeardown)(uint32_t arg);
-static FnFriendConnTeardown Real_FriendConnTeardown = nullptr;
-static uint8_t __cdecl Mine_FriendConnTeardown(uint32_t arg)
-{
-    void* ret_ip = _ReturnAddress();
-    uint32_t ret_rva = s_ffxiBase ? (uint32_t)((uintptr_t)ret_ip - (uintptr_t)s_ffxiBase) : 0;
-    uint32_t before = s_ffxiBase ? *(uint32_t*)(s_ffxiBase + OFF_FRIEND_CONN_STATE) : 0;
-    xiloader::console::output(xiloader::color::warning,
-        "FriendConnTeardown (FUN_04707570): caller=FFXi+0x%X arg=%u DAT_04AEE900 before=0x%08X",
-        ret_rva, arg, before);
-    uint8_t r = Real_FriendConnTeardown ? Real_FriendConnTeardown(arg) : 1;
-    uint32_t after = s_ffxiBase ? *(uint32_t*)(s_ffxiBase + OFF_FRIEND_CONN_STATE) : 0;
-    xiloader::console::output(xiloader::color::warning,
-        "FriendConnTeardown returned %u, DAT_04AEE900 after=0x%08X", r, after);
-    return r;
 }
 
 /* Signature-based offset resolution. Finds anchor functions by unique byte
@@ -2322,333 +1484,6 @@ static bool resolve_polcore_offsets(uint8_t* base)
         }
     }
 
-    /* polcore_befriend_driver (FUN_045A4170) -- 14-state befriend SM (case
-     * 0..0xD). Prologue: `SUB ESP,0xC; MOV ECX,[ESP+0x10]; PUSH EBX; MOV
-     * EAX,ECX; PUSH ESI; SHL EAX,4; ADD EAX,ECX; PUSH ECX; LEA EAX,[EAX+EAX*2];
-     * LEA EDX,[ECX+EAX*2]; LEA EBX,[EDX*8 + DESC_BASE]`. The 0xC stack frame
-     * + double-LEA stride math + the 14-case switch later are highly specific. */
-    bool ok_befriend_drv = false;
-    {
-        DWORD bd = xiloader::functions::FindPattern(mod,
-            (const unsigned char*)"\x83\xEC\x0C\x8B\x4C\x24\x10\x53\x8B\xC1\x56"
-                                  "\xC1\xE0\x04\x03\xC1\x51\x8D\x04\x40\x8D\x14\x41\x8D\x1C\xD5",
-            "xxxxxxxxxxxxxxxxxxxxxxxxxx");
-        if (bd)
-        {
-            OFF_POL_BEFRIEND_DRIVER = bd - baseAddr;
-            ok_befriend_drv = true;
-            resolved++;
-        }
-        else
-        {
-            xiloader::console::output(xiloader::color::error,
-                "FriendSys: pol_befriend_driver pattern FAILED to resolve");
-        }
-    }
-
-    /* polcore_send_body_sm -- body-send sub-SM. Anchor on the unique switch
-     * core (read slot+9 sub-state, switch 0..3, jump table):
-     *   33 C0              XOR EAX,EAX
-     *   8A 46 09           MOV AL, [ESI+9]
-     *   83 F8 03           CMP EAX, 3
-     *   0F 87 EE 00 00 00  JA +0xEE
-     *   FF 24 85 <imm32>   JMP [EAX*4 + table]
-     * Build 2026-07-02 (ffximain-69F0846A) dropped the old
-     * `56 8B 74 24 08` (PUSH ESI; MOV ESI,[ESP+8]) prologue -- `desc` now
-     * arrives live in ESI (ESI-in convention) and the entry moved +5 to the
-     * XOR. Old pattern anchored on the prologue and no longer matched. If the
-     * old prologue is present (pre-2026-07 builds), back up 5 bytes to the
-     * real entry. NOTE: the ESI-in ABI is why the Mine_PolSendBodySm hook is
-     * no longer attached (see DetourAttach site). */
-    bool ok_send_body = false;
-    {
-        DWORD sb = xiloader::functions::FindPattern(mod,
-            (const unsigned char*)"\x33\xC0\x8A\x46\x09\x83\xF8\x03"
-                                  "\x0F\x87\xEE\x00\x00\x00\xFF\x24\x85",
-            "xxxxxxxxxxxxxxxxx");
-        if (sb)
-        {
-            uint8_t* pre = (uint8_t*)(uintptr_t)(sb - 5);
-            if (pre[0] == 0x56 && pre[1] == 0x8B && pre[2] == 0x74 &&
-                pre[3] == 0x24 && pre[4] == 0x08)
-                sb -= 5;   /* older build: entry includes the push-esi prologue */
-            OFF_POL_SEND_BODY_SM = sb - baseAddr;
-            ok_send_body = true;
-            resolved++;
-        }
-        else
-        {
-            xiloader::console::output(xiloader::color::error,
-                "FriendSys: pol_send_body_sm pattern FAILED to resolve");
-        }
-    }
-
-    /* polcore_body_fetch_driver (FUN_045A7550) -- wraps body-upload SM
-     * (FUN_045A6870) with lock + slot validation + second call to the
-     * inner driver. Similar shape to notif_pickup wrapper but disambiguated
-     * by JMP displacements (`7E 2D` and `74 1E` vs notif's `7E 32`) and
-     * the second validation call. */
-    bool ok_body_fetch = false;
-    {
-        DWORD bf = xiloader::functions::FindPattern(mod,
-            (const unsigned char*)"\x56\x57\xE8\x00\x00\x00\x00\x8B\x7C\x24\x0C\x57\xE8"
-                                  "\x00\x00\x00\x00\x8B\xF0\x83\xC4\x04\x85\xF6\x7E\x2D"
-                                  "\x57\xE8\x00\x00\x00\x00\x8B\xF0\x83\xC4\x04\x85\xF6"
-                                  "\x74\x1E",
-            "xxx????xxxxxx????xxxxxxxxxxxx????xxxxxxxx");
-        if (bf)
-        {
-            OFF_POL_BODY_FETCH_DRIVER = bf - baseAddr;
-            ok_body_fetch = true;
-            resolved++;
-        }
-        else
-        {
-            xiloader::console::output(xiloader::color::error,
-                "FriendSys: pol_body_fetch_driver pattern FAILED to resolve");
-        }
-    }
-
-    /* polcore_notif_cb_reg (FUN_0459B500) -- notification callback registrar.
-     * Prologue: `PUSH -1; CALL <lock>; MOV EAX,[ESP+8]; ADD ESP,4;
-     * MOV [CALLBACK_PTR], EAX; RET`. Stores its arg into the CALLBACK_PTR
-     * global. The `6A FF E8 ... 8B 44 24 08 83 C4 04 A3` sequence is unique
-     * (push -1 + immediate store-to-global). */
-    bool ok_notif_cb_reg = false;
-    {
-        DWORD cb = xiloader::functions::FindPattern(mod,
-            (const unsigned char*)"\x6A\xFF\xE8\x00\x00\x00\x00\x8B\x44\x24\x08\x83\xC4\x04"
-                                  "\xA3\x00\x00\x00\x00\xC3",
-            "xxx????xxxxxxxx????x");
-        if (cb)
-        {
-            OFF_POL_NOTIF_CB_REG = cb - baseAddr;
-            ok_notif_cb_reg = true;
-            resolved++;
-        }
-        else
-        {
-            xiloader::console::output(xiloader::color::error,
-                "FriendSys: pol_notif_cb_reg pattern FAILED to resolve");
-        }
-    }
-
-    /* polcore_notif_enqueue (FUN_0459C570) -- notification queue enqueuer.
-     * Prologue: `MOV EAX,[CALLBACK_PTR]; TEST EAX,EAX; JNE +6; MOV EAX,1;
-     * RET; MOV EAX,[QUEUE_COUNT]; CMP EAX,4; JL +3; XOR EAX,EAX; RET`.
-     * The imm32 at offset +1 is OFF_CALLBACK_PTR -- extract for free. */
-    bool ok_notif_enq = false;
-    {
-        DWORD ne = xiloader::functions::FindPattern(mod,
-            (const unsigned char*)"\xA1\x00\x00\x00\x00\x85\xC0\x75\x06\xB8\x01\x00\x00\x00\xC3"
-                                  "\xA1\x00\x00\x00\x00\x83\xF8\x04\x7C\x03\x33\xC0\xC3",
-            "x????xxxxxxxxxxx????xxxxxxxx");
-        if (ne)
-        {
-            OFF_POL_NOTIF_ENQUEUE = ne - baseAddr;
-            OFF_CALLBACK_PTR      = *(uint32_t*)(ne + 1) - baseAddr;
-            ok_notif_enq = true;
-            resolved += 2;
-        }
-        else
-        {
-            xiloader::console::output(xiloader::color::error,
-                "FriendSys: pol_notif_enqueue pattern FAILED to resolve");
-        }
-    }
-
-    /* polcore_registrar (FUN_0459FF20) -- descriptor registration helper.
-     * Prologue clears desc+0x318 (8 bytes), then writes magic constants to
-     * struct fields at +0x320 (=0xA), +0x322 (=4), +0x323 (input cl), +0x324
-     * (=3), +0x326 (input dx). The specific struct offsets 0x318/0x320/
-     * 0x322/0x323/0x324/0x326 are unique to this descriptor setup. */
-    bool ok_registrar = false;
-    {
-        DWORD pr = xiloader::functions::FindPattern(mod,
-            (const unsigned char*)"\x56\x8B\x74\x24\x08\x6A\x08\x8D\x86\x18\x03\x00\x00\x50"
-                                  "\xE8\x00\x00\x00\x00\x8A\x4C\x24\x14\x66\x8B\x54\x24\x18"
-                                  "\x83\xC4\x08\x66\xC7\x86\x20\x03\x00\x00\x0A\x00",
-            "xxxxxxxxxxxxxxx????xxxxxxxxxxxxxxxxxxxxx");
-        if (pr)
-        {
-            OFF_POL_REGISTRAR = pr - baseAddr;
-            ok_registrar = true;
-            resolved++;
-        }
-        else
-        {
-            xiloader::console::output(xiloader::color::error,
-                "FriendSys: pol_registrar pattern FAILED to resolve");
-        }
-    }
-
-    /* polcore_slot_teardown (FUN_0459FBD0) -- slot cleanup helper. Prologue:
-     * `MOV EAX,[ESP+8]; TEST EAX,EAX; JGE +5; CALL <err>; PUSH EBX; PUSH ESI;
-     * MOV ESI,[ESP+0xC]; OR EBX,-1; MOV ECX,[ESI+4]; TEST ECX,ECX; JL +0x20;
-     * MOVSX EAX, BYTE [ESI+1]; SUB EAX,0; JE +0xB`. The `83 CB FF`
-     * (OR EBX,-1) + `0F BE 46 01` (signed byte extend from ESI+1) +
-     * `83 E8 00` (sub 0 -- same byte test as JE) is the distinguishing
-     * combination. */
-    bool ok_slot_td = false;
-    {
-        DWORD st = xiloader::functions::FindPattern(mod,
-            (const unsigned char*)"\x8B\x44\x24\x08\x85\xC0\x7D\x05\xE8\x00\x00\x00\x00"
-                                  "\x53\x56\x8B\x74\x24\x0C\x83\xCB\xFF\x8B\x4E\x04"
-                                  "\x85\xC9\x7C\x20\x0F\xBE\x46\x01\x83\xE8\x00\x74\x0B",
-            "xxxxxxxxx????xxxxxxxxxxxxxxxxxxxxxxxxx");
-        if (st)
-        {
-            OFF_POL_SLOT_TEARDOWN = st - baseAddr;
-            ok_slot_td = true;
-            resolved++;
-        }
-        else
-        {
-            xiloader::console::output(xiloader::color::error,
-                "FriendSys: pol_slot_teardown pattern FAILED to resolve");
-        }
-    }
-
-    /* polcore_pump_gate (FUN_0459EBD0) -- entry validator for SM pumps.
-     * Prologue: `MOV EAX,[ESP+8]; PUSH ESI; TEST EAX,EAX; JL bail;
-     * CMP EAX,4; JGE bail; MOV ESI,[ESP+8]; CMP BYTE [ESI],0; JNE next;
-     * MOV EAX,-0x1410; POP ESI; RET`. The 0..3 slot range check + -0x1410
-     * (slot stale) sentinel is unique. */
-    bool ok_pump_gate = false;
-    {
-        DWORD pg = xiloader::functions::FindPattern(mod,
-            (const unsigned char*)"\x8B\x44\x24\x08\x56\x85\xC0\x0F\x8C\x9A\x00\x00\x00"
-                                  "\x83\xF8\x04\x0F\x8D\x91\x00\x00\x00\x8B\x74\x24\x08"
-                                  "\x80\x3E\x00\x75\x07\xB8\xF0\xEB\xFF\xFF\x5E\xC3",
-            "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx");
-        if (pg)
-        {
-            OFF_POL_PUMP_GATE = pg - baseAddr;
-            ok_pump_gate = true;
-            resolved++;
-        }
-        else
-        {
-            xiloader::console::output(xiloader::color::error,
-                "FriendSys: pol_pump_gate pattern FAILED to resolve");
-        }
-    }
-
-    /* polcore_friend_inserter (FUN_0459EEB0) -- Array2 record writer. The
-     * core "write record to Array2 entry" function. Prologue: `PUSH ESI;
-     * MOV ESI,[ESP+0xC]; PUSH EDI; MOV EDI,[ESP+0xC]; XOR ECX,ECX; MOV EAX,
-     * [EDI]; AND EAX, 0x60 (visibility bits); OR EAX,ECX; MOV ECX,[ESI+0x98];
-     * JE ...; OR ECX,1; ...; AND ECX,~1; MOV [ESI+0x98],ECX`. The 0x60 mask
-     * (visibility) + +0x98 (occupied flag) combination is unique to this
-     * Array2 writer. */
-    bool ok_inserter = false;
-    {
-        DWORD fi = xiloader::functions::FindPattern(mod,
-            (const unsigned char*)"\x56\x8B\x74\x24\x0C\x57\x8B\x7C\x24\x0C\x33\xC9\x8B\x07"
-                                  "\x83\xE0\x60\x0B\xC1\x8B\x8E\x98\x00\x00\x00\x74\x05"
-                                  "\x83\xC9\x01\xEB\x03\x83\xE1\xFE\x89\x8E\x98",
-            "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx");
-        if (fi)
-        {
-            OFF_POL_FRIEND_INSERTER = fi - baseAddr;
-            ok_inserter = true;
-            resolved++;
-        }
-        else
-        {
-            xiloader::console::output(xiloader::color::error,
-                "FriendSys: pol_friend_inserter pattern FAILED to resolve");
-        }
-    }
-
-    /* polcore_slot_alloc (FUN_0459EBA0) -- iterates descriptor array looking
-     * for free slot (desc[0]==0). Loop: `XOR EAX,EAX; MOV ECX, desc_base;
-     * loop: CMP BYTE [ECX],0; JE found; ADD ECX, 0x338 (stride); INC EAX;
-     * CMP ECX, desc_end; JL loop; MOV EAX, -256; RET`. The 0x338 stride
-     * literal + -256 sentinel return is unique. */
-    bool ok_slot_alloc = false;
-    {
-        DWORD sa = xiloader::functions::FindPattern(mod,
-            (const unsigned char*)"\x33\xC0\xB9\x00\x00\x00\x00\x80\x39\x00\x74\x14"
-                                  "\x81\xC1\x38\x03\x00\x00\x40\x81\xF9\x00\x00\x00\x00"
-                                  "\x7C\xEC\xB8\x00\xFF\xFF\xFF\xC3",
-            "xxx????xxxxxxxxxxxxxx????xxxxxxxx");
-        if (sa)
-        {
-            OFF_POL_SLOT_ALLOC = sa - baseAddr;
-            ok_slot_alloc = true;
-            resolved++;
-        }
-        else
-        {
-            xiloader::console::output(xiloader::color::error,
-                "FriendSys: pol_slot_alloc pattern FAILED to resolve");
-        }
-    }
-
-    /* polcore_filename_decoder body (FUN_0459B640) -- base64-decodes 96-char
-     * msg filenames into 72-byte records, then XOR-decrypts. Prologue checks
-     * filename length >= 0x60 (96): `PUSH EDI; MOV EDI,[ESP+0xC]; PUSH EDI;
-     * CALL strlen; ADD ESP,4; CMP EAX,0x60; JAE +7; MOV EAX,0xFFFFEC00 (-0x1400);
-     * POP EDI; RET`. The 0x60 length check + -0x1400 error code are unique
-     * to filename validation. We pattern the body; existing OFF_FILENAME_DECODER
-     * pointed at a thin thunk that just forwards to this body -- both have
-     * identical (arg1, arg2) cdecl signatures so retargeting works. */
-    bool ok_fname_dec = false;
-    {
-        DWORD fd = xiloader::functions::FindPattern(mod,
-            (const unsigned char*)"\x57\x8B\x7C\x24\x0C\x57\xE8\x00\x00\x00\x00\x83\xC4\x04"
-                                  "\x83\xF8\x60\x73\x07\xB8\x00\xEC\xFF\xFF\x5F\xC3",
-            "xxxxxxx????xxxxxxxxxxxxxxx");
-        if (fd)
-        {
-            OFF_POL_FILENAME_DECODER = fd - baseAddr;
-            ok_fname_dec = true;
-            resolved++;
-        }
-        else
-        {
-            xiloader::console::output(xiloader::color::error,
-                "FriendSys: filename_decoder pattern FAILED to resolve");
-        }
-    }
-
-    /* polcore_bitmap_op (FUN_045A3CF0) -- friend-occupancy bitmap manager.
-     * Prologue:
-     *   MOV EAX,[ESP+4]   ; op flag (0/1 for friend/linkshell array)
-     *   MOV EDX,[ESP+8]   ; bit index
-     *   PUSH ESI
-     *   XOR ESI,ESI
-     *   TEST EAX,EAX
-     *   JE +6
-     *   ADD EDX, 0xC8     ; +200 for linkshell range
-     *   MOV EAX,[ESP+0x10]; op (0=set,1=clear,2=test)
-     *   MOV ECX,EDX
-     *   AND ECX,7
-     *   SAR EDX,3
-     *   SUB EAX,0; JE...
-     * The 0xC8 (200 friend slots) + the bit-extraction shifts (and 7, sar 3)
-     * + dispatcher on `sub eax,0` are the unique fingerprint. */
-    bool ok_bitmap_op = false;
-    {
-        DWORD bo = xiloader::functions::FindPattern(mod,
-            (const unsigned char*)"\x8B\x44\x24\x04\x8B\x54\x24\x08\x56\x33\xF6\x85\xC0\x74\x06"
-                                  "\x81\xC2\xC8\x00\x00\x00\x8B\x44\x24\x10\x8B\xCA\x83\xE1\x07"
-                                  "\xC1\xFA\x03\x83\xE8\x00\x74\x2B",
-            "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx");
-        if (bo)
-        {
-            OFF_POL_BITMAP_OP = bo - baseAddr;
-            ok_bitmap_op = true;
-            resolved++;
-        }
-        else
-        {
-            xiloader::console::output(xiloader::color::error,
-                "FriendSys: polcore_bitmap_op pattern FAILED to resolve");
-        }
-    }
-
     /* notif_pickup_driver wrapper (FUN_045A5D10) -- wraps notif_pump body
      * @ +0x25B90 with lock-acquire + slot validation. Caller signature
      * (slot, &output) identical to body. We pattern the wrapper since
@@ -2862,56 +1697,11 @@ static bool resolve_polcore_offsets(uint8_t* base)
     bool all_ok = ok_pump && ok_init && ok_enrich && ok_drv && ok_callerC &&
                   ok_tick && ok_tick_enable && ok_tickkill && ok_fs_drv && ok_fs_init &&
                   ok_whois_drv && ok_whois_init && ok_notif_drv && ok_msgrec_drv &&
-                  ok_bitmap_op && ok_fname_dec && ok_slot_alloc && ok_inserter &&
-                  ok_pump_gate && ok_slot_td && ok_registrar && ok_notif_enq &&
-                  ok_notif_cb_reg && ok_body_fetch && ok_send_body && ok_befriend_drv &&
                   ok_np_init && ok_mr_init && ok_dispatch &&
                   ok_handle && ok_handle_idx && ok_array1 &&
                   ok_engate && ok_init_flag && ok_notif_struct && ok_pol_router;
     xiloader::console::output(all_ok ? xiloader::color::success : xiloader::color::warning,
-        "FriendSys: polcore offsets resolved: pump=%s init=%s enrich=%s drv=%s "
-        "callerC=%s tick=%s tick_kill=%s fs_drv=%s fs_init=%s whois_drv=%s "
-        "whois_init=%s notif_drv=%s msgrec_drv=%s bitmap_op=%s fname_dec=%s "
-        "slot_alloc=%s inserter=%s pump_gate=%s slot_td=%s registrar=%s "
-        "notif_enq=%s notif_cb_reg=%s body_fetch=%s send_body=%s befriend_drv=%s "
-        "np_init=%s mr_init=%s dispatch=%s handle=%s handle_idx=%s array1=%s "
-        "engate=%s init_flag=%s notif_struct=%s pol_router=%s (%d/36)",
-        ok_pump       ? "ok" : "FAIL",
-        ok_init       ? "ok" : "FAIL",
-        ok_enrich     ? "ok" : "FAIL",
-        ok_drv        ? "ok" : "FAIL",
-        ok_callerC    ? "ok" : "FAIL",
-        ok_tick       ? "ok" : "FAIL",
-        ok_tickkill   ? "ok" : "FAIL",
-        ok_fs_drv     ? "ok" : "FAIL",
-        ok_fs_init    ? "ok" : "FAIL",
-        ok_whois_drv  ? "ok" : "FAIL",
-        ok_whois_init ? "ok" : "FAIL",
-        ok_notif_drv  ? "ok" : "FAIL",
-        ok_msgrec_drv ? "ok" : "FAIL",
-        ok_bitmap_op  ? "ok" : "FAIL",
-        ok_fname_dec  ? "ok" : "FAIL",
-        ok_slot_alloc ? "ok" : "FAIL",
-        ok_inserter   ? "ok" : "FAIL",
-        ok_pump_gate  ? "ok" : "FAIL",
-        ok_slot_td    ? "ok" : "FAIL",
-        ok_registrar     ? "ok" : "FAIL",
-        ok_notif_enq     ? "ok" : "FAIL",
-        ok_notif_cb_reg  ? "ok" : "FAIL",
-        ok_body_fetch    ? "ok" : "FAIL",
-        ok_send_body     ? "ok" : "FAIL",
-        ok_befriend_drv  ? "ok" : "FAIL",
-        ok_np_init       ? "ok" : "FAIL",
-        ok_mr_init       ? "ok" : "FAIL",
-        ok_dispatch      ? "ok" : "FAIL",
-        ok_handle        ? "ok" : "FAIL",
-        ok_handle_idx    ? "ok" : "FAIL",
-        ok_array1        ? "ok" : "FAIL",
-        ok_engate        ? "ok" : "FAIL",
-        ok_init_flag     ? "ok" : "FAIL",
-        ok_notif_struct  ? "ok" : "FAIL",
-        ok_pol_router    ? "ok" : "FAIL",
-        resolved);
+        "FriendSys: polcore offsets resolved (%d)", resolved);
     return all_ok;
 }
 
@@ -2947,163 +1737,6 @@ static bool resolve_ffximain_offsets(uint8_t* base)
         {
             xiloader::console::output(xiloader::color::error,
                 "FriendSys: populate_friend_data pattern FAILED to resolve");
-        }
-    }
-
-    /* friend_conn_teardown (FUN_04707570) + OFF_FRIEND_CONN_STATE -- the
-     * teardown's first instruction is `MOV ECX, [DAT_04AEE900]; TEST ECX,ECX;
-     * JZ +0x1F; PUSH EBX; MOV EBX,[ESP+8]; PUSH EBX; CALL FUN_04701AE0`.
-     * Bytes `8B 0D ?? ?? ?? ?? 85 C9 74 1F 53 8B 5C 24 08 53 E8`. The imm32
-     * at offset 2 of the match is the absolute address of FRIEND_CONN_STATE,
-     * so we resolve both offsets from one anchor. */
-    bool ok_teardown = false;
-    {
-        DWORD td = xiloader::functions::FindPattern(mod,
-            (const unsigned char*)"\x8B\x0D\x00\x00\x00\x00\x85\xC9\x74\x1F\x53"
-                                  "\x8B\x5C\x24\x08\x53\xE8",
-            "xx????xxxxxxxxxxx");
-        if (td)
-        {
-            OFF_FRIEND_CONN_TEARDOWN = td - baseAddr;
-            OFF_FRIEND_CONN_STATE    = *(uint32_t*)(td + 2) - baseAddr;
-            ok_teardown = true;
-            resolved += 2;
-        }
-        else
-        {
-            xiloader::console::output(xiloader::color::error,
-                "FriendSys: friend_conn_teardown pattern FAILED to resolve");
-        }
-    }
-
-    /* inbox_row_callback (FFXi+0x200420) -- friend-system network response
-     * row handler. Prologue references TWO data globals in its first 12
-     * bytes: `51 A1 [OFF_MSG_OBJ_NATIVE] C6 05 [OFF_INBOX_INIT_DONE] 00 56
-     * 8B 48 08 85 C9`. push ECX; mov EAX,[m32]; mov byte [m32], 0; push ESI;
-     * mov ECX,[EAX+8]; test ECX,ECX. The two imm32s are at offsets +2 and
-     * +8 of the match -- we extract both globals + the function entry. */
-    bool ok_inbox_row = false;
-    {
-        DWORD ir = xiloader::functions::FindPattern(mod,
-            (const unsigned char*)"\x51\xA1\x00\x00\x00\x00\xC6\x05\x00\x00\x00\x00\x00"
-                                  "\x56\x8B\x48\x08\x85\xC9",
-            "xx????xx?????xxxxxx");
-        if (ir)
-        {
-            OFF_INBOX_ROW_CALLBACK    = ir - baseAddr;
-            uint32_t msg_obj_addr     = *(uint32_t*)(ir + 2);
-            uint32_t inbox_done_addr  = *(uint32_t*)(ir + 8);
-            OFF_MSG_OBJ_NATIVE        = msg_obj_addr - baseAddr;
-            OFF_INBOX_INIT_DONE       = inbox_done_addr - baseAddr;
-            ok_inbox_row = true;
-            resolved += 3;  /* function + 2 globals */
-        }
-        else
-        {
-            xiloader::console::output(xiloader::color::error,
-                "FriendSys: inbox_row_callback pattern FAILED to resolve");
-        }
-    }
-
-    /* DAT message display thunk (FUN_04762DD0) -- __cdecl(cat, msg_id, ...).
-     * Hook target for befriend error capture. Prologue iterates a 28-entry
-     * category table: `56 57 8B 7C 24 0C 33 F6 39 3C F5 ?? ?? ?? ?? 74 14 46
-     * 83 FE 1C 72 F1`. The `83 FE 1C` (CMP ESI, 0x1C -- 28 categories) is the
-     * uniquely identifying constant. */
-    bool ok_dat_msg = false;
-    {
-        DWORD dm = xiloader::functions::FindPattern(mod,
-            (const unsigned char*)"\x56\x57\x8B\x7C\x24\x0C\x33\xF6\x39\x3C\xF5"
-                                  "\x00\x00\x00\x00\x74\x14\x46\x83\xFE\x1C\x72\xF1",
-            "xxxxxxxxxxx????xxxxxxxx");
-        if (dm)
-        {
-            OFF_FFXI_DAT_MSG_THUNK = dm - baseAddr;
-            ok_dat_msg = true;
-            resolved++;
-        }
-        else
-        {
-            xiloader::console::output(xiloader::color::error,
-                "FriendSys: dat_msg_thunk pattern FAILED to resolve");
-        }
-    }
-
-    /* /befriend chat command handler (FUN_04689F50) -- bails if token count
-     * != 2. Prologue references TWO data globals: `A1 [TOKEN_COUNT] 83 EC 68
-     * 83 F8 02 75 76 A1 [TOKEN_PTRS] C6 05 ?? ?? ?? ?? 00 6A 10`. The
-     * `mov EAX,[m32]; sub ESP,0x68; cmp EAX,2; jne <bail>` is the token-count
-     * gate, followed by mov EAX,[token_ptrs_m32]. Resolves: handler entry,
-     * OFF_FFXI_TOKEN_COUNT (offset +1), OFF_FFXI_TOKEN_PTRS (offset +14). */
-    bool ok_befriend_hnd = false;
-    {
-        DWORD bh = xiloader::functions::FindPattern(mod,
-            (const unsigned char*)"\xA1\x00\x00\x00\x00\x83\xEC\x68\x83\xF8\x02\x75\x76"
-                                  "\xA1\x00\x00\x00\x00\xC6\x05\x00\x00\x00\x00\x00"
-                                  "\x6A\x10",
-            "x????xxxxxxxxx????xx?????xx");
-        if (bh)
-        {
-            OFF_FFXI_BEFRIEND_HANDLER = bh - baseAddr;
-            OFF_FFXI_TOKEN_COUNT      = *(uint32_t*)(bh + 1)  - baseAddr;
-            OFF_FFXI_TOKEN_PTRS       = *(uint32_t*)(bh + 14) - baseAddr;
-            ok_befriend_hnd = true;
-            resolved += 3;
-        }
-        else
-        {
-            xiloader::console::output(xiloader::color::error,
-                "FriendSys: befriend_handler pattern FAILED to resolve");
-        }
-    }
-
-    /* friend_conn_init (FUN_04707550) -- initialize-if-NULL pattern: `MOV EAX,
-     * [conn_state]; TEST EAX,EAX; JNE +0x10; MOV ECX, conn_state_base;
-     * MOV [conn_state], ECX; JMP <inner_init>`. Bytes
-     * `A1 ?? ?? ?? ?? 85 C0 75 10 B9 ?? ?? ?? ?? 89 0D ?? ?? ?? ?? E9`.
-     * Cross-validates: imm32 at offset +1 should equal the conn-state global
-     * we already resolved via teardown. */
-    bool ok_conn_init = false;
-    {
-        DWORD ci = xiloader::functions::FindPattern(mod,
-            (const unsigned char*)"\xA1\x00\x00\x00\x00\x85\xC0\x75\x10\xB9\x00\x00\x00\x00"
-                                  "\x89\x0D\x00\x00\x00\x00\xE9",
-            "x????xxxxx????xx????x");
-        if (ci)
-        {
-            OFF_FRIEND_CONN_INIT = ci - baseAddr;
-            ok_conn_init = true;
-            resolved++;
-        }
-        else
-        {
-            xiloader::console::output(xiloader::color::error,
-                "FriendSys: friend_conn_init pattern FAILED to resolve");
-        }
-    }
-
-    /* MsgProcess (FUN_04810910) -- scroll-list framework Enter handler.
-     * Prologue: `MOV EAX,[ESP+0xC]; SUB ESP, 0x1B4; TEST EAX,EAX; PUSH EBP;
-     * PUSH ESI; MOV BYTE [INBOX_INIT_DONE], 0; JNE <large rel32>`. The
-     * `81 EC B4 01 00 00` (sub esp, 0x1B4 = 436B locals) is a uniquely-large
-     * stack frame for this dispatcher. Bytes:
-     * `8B 44 24 0C 81 EC B4 01 00 00 85 C0 55 56 C6 05 ?? ?? ?? ?? 00 0F 85`. */
-    bool ok_msg_process = false;
-    {
-        DWORD mp = xiloader::functions::FindPattern(mod,
-            (const unsigned char*)"\x8B\x44\x24\x0C\x81\xEC\xB4\x01\x00\x00\x85\xC0\x55\x56"
-                                  "\xC6\x05\x00\x00\x00\x00\x00\x0F\x85",
-            "xxxxxxxxxxxxxxxx?????xx");
-        if (mp)
-        {
-            OFF_MSG_PROCESS = mp - baseAddr;
-            ok_msg_process = true;
-            resolved++;
-        }
-        else
-        {
-            xiloader::console::output(xiloader::color::error,
-                "FriendSys: MsgProcess pattern FAILED to resolve");
         }
     }
 
@@ -3168,56 +1801,6 @@ static bool resolve_ffximain_offsets(uint8_t* base)
         }
     }
 
-    /* befriend_op_send (FUN_047049F0) -- op-table state-2 callback polled by
-     * friend_op_slot_pump. Switch on state 0..3 via jump table at imm32+22.
-     * Prologue: `MOV EAX,[ESP+8]; SUB ESP,8; CMP EAX,3; PUSH EBX; PUSH ESI;
-     * JA rel32; JMP [EAX*4 + imm32]`. Bytes: `8B 44 24 08 83 EC 08 83 F8 03
-     * 53 56 0F 87 89 01 00 00 FF 24 85 ?? ?? ?? ??`. */
-    bool ok_op_send = false;
-    {
-        DWORD os = xiloader::functions::FindPattern(mod,
-            (const unsigned char*)"\x8B\x44\x24\x08\x83\xEC\x08\x83\xF8\x03\x53\x56"
-                                  "\x0F\x87\x89\x01\x00\x00\xFF\x24\x85",
-            "xxxxxxxxxxxxxxxxxxxxx");
-        if (os)
-        {
-            OFF_FFXI_BEFRIEND_OP_SEND = os - baseAddr;
-            ok_op_send = true;
-            resolved++;
-        }
-        else
-        {
-            xiloader::console::output(xiloader::color::error,
-                "FriendSys: befriend_op_send pattern FAILED to resolve");
-        }
-    }
-
-    /* friend_sys_init (FUN_046FFFD0) -- friend system initializer. Allocates
-     * DAT_04AEE768 (~86KB friend manager buffer), copies strings/account.
-     * Prologue includes early-return-1 on NULL arg, then `MOV EAX,[FRIEND_MGR];
-     * TEST EAX,EAX; JNE bail; CMP ESI,1; JL bail; CMP ESI,3; JG bail`.
-     * The dual range check `83 FE 01 0F 8C ... 83 FE 03 0F 8F` (arg in 1..3)
-     * is the unique fingerprint. */
-    bool ok_sys_init = false;
-    {
-        DWORD si = xiloader::functions::FindPattern(mod,
-            (const unsigned char*)"\x56\x8B\x74\x24\x08\x85\xF6\x75\x04\xB0\x01\x5E\xC3"
-                                  "\xA1\x00\x00\x00\x00\x85\xC0\x0F\x85\x00\x00\x00\x00"
-                                  "\x83\xFE\x01\x0F\x8C\x00\x00\x00\x00\x83\xFE\x03\x0F\x8F",
-            "xxxxxxxxxxxxxx????xxxx????xxxxx????xxxxx");
-        if (si)
-        {
-            OFF_FRIEND_SYS_INIT = si - baseAddr;
-            ok_sys_init = true;
-            resolved++;
-        }
-        else
-        {
-            xiloader::console::output(xiloader::color::error,
-                "FriendSys: friend_sys_init pattern FAILED to resolve");
-        }
-    }
-
     /* display_cb (FUN_04702750) -- notification display callback. Prologue:
      * `MOV ECX,[CONN_STATE]; TEST ECX,ECX; JE +0x12; MOV EAX,[ESP+4];
      * TEST EAX,EAX; JNE +0xA; MOV EAX,[ESP+8]; PUSH EAX; CALL <add_notif>;
@@ -3245,129 +1828,6 @@ static bool resolve_ffximain_offsets(uint8_t* base)
         }
     }
 
-    /* polcore_queue_sm_driver (FUN_04704170) -- queue-walking SM driver,
-     * __thiscall(self, state, *entry_out, *err_out). Switch on state 0..3
-     * via jump table. Prologue: `MOV EAX,[ESP+4]; PUSH EBX; PUSH ESI;
-     * CMP EAX,3; PUSH EDI; MOV ESI,ECX; JA +0x1B0; JMP [EAX*4 + imm32]`.
-     * Distinguishable from befriend_op_send by stack-arg offset (4 not 8)
-     * and `MOV ESI,ECX` (thiscall this). */
-    bool ok_queue_drv = false;
-    {
-        DWORD qd = xiloader::functions::FindPattern(mod,
-            (const unsigned char*)"\x8B\x44\x24\x04\x53\x56\x83\xF8\x03\x57\x8B\xF1"
-                                  "\x0F\x87\xB0\x01\x00\x00\xFF\x24\x85",
-            "xxxxxxxxxxxxxxxxxxxxx");
-        if (qd)
-        {
-            OFF_POLCORE_QUEUE_SM_DRIVER = qd - baseAddr;
-            ok_queue_drv = true;
-            resolved++;
-        }
-        else
-        {
-            xiloader::console::output(xiloader::color::error,
-                "FriendSys: polcore_queue_sm_driver pattern FAILED to resolve");
-        }
-    }
-
-    /* dismiss_completion_cb (FUN_0480FD60) -- fires when dismiss SM completes.
-     * Sets DAT_04C3FFA0=0, clears chat-related state, sets read flag at
-     * msg_obj+0x64. The combination of `C6 05 [INBOX_INIT_DONE] 00` (clear
-     * the inbox flag), `C6 40 64 01` (set byte at +0x64), and the test
-     * structure is uniquely identifying. */
-    bool ok_dismiss_cb = false;
-    {
-        DWORD dc = xiloader::functions::FindPattern(mod,
-            (const unsigned char*)"\x8B\x44\x24\x0C\xC6\x05\x00\x00\x00\x00\x00\x85\xC0\x75\x1D"
-                                  "\x8B\x44\x24\x04\x8B\x0D\x00\x00\x00\x00\x50\xE8\x00\x00\x00\x00"
-                                  "\xA1\x00\x00\x00\x00\x85\xC0\x74\x04\xC6\x40\x64\x01",
-            "xxxxxx?????xxxxxxxxxx????xx????x????xxxxxxxx");
-        if (dc)
-        {
-            OFF_DISMISS_COMPLETION_CB = dc - baseAddr;
-            ok_dismiss_cb = true;
-            resolved++;
-        }
-        else
-        {
-            xiloader::console::output(xiloader::color::error,
-                "FriendSys: dismiss_completion_cb pattern FAILED to resolve");
-        }
-    }
-
-    /* dismiss_op2_handler (FUN_04705590) -- op[2] file-IO handler. Same +0xC48
-     * struct offset as dismiss_op1 (LEA into 3144-byte struct). Prologue:
-     * `PUSH ESI; MOV ESI,[ESP+8]; PUSH EDI; MOV EDI,[ESP+0x10]; TEST EDI,EDI;
-     * JNE +0x2B; PUSH 0; LEA EAX,[ESI+0xC48]; PUSH 0x200; PUSH EAX; PUSH 7`. */
-    bool ok_dismiss_op2 = false;
-    {
-        DWORD d2 = xiloader::functions::FindPattern(mod,
-            (const unsigned char*)"\x56\x8B\x74\x24\x08\x57\x8B\x7C\x24\x10\x85\xFF\x75\x2B"
-                                  "\x6A\x00\x8D\x86\x48\x0C\x00\x00\x68\x00\x02\x00\x00\x50\x6A\x07",
-            "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxx");
-        if (d2)
-        {
-            OFF_DISMISS_OP2_HANDLER = d2 - baseAddr;
-            ok_dismiss_op2 = true;
-            resolved++;
-        }
-        else
-        {
-            xiloader::console::output(xiloader::color::error,
-                "FriendSys: dismiss_op2_handler pattern FAILED to resolve");
-        }
-    }
-
-    /* FC90 (FUN_0480FC90) -- opens mes1rcv or mes2frnd sub-menu via vtable[+0x44].
-     * Copies 18 dwords (72 bytes) from arg to this+0x20 using `rep movsd`.
-     * Distinctive bytes: `8D 78 20 B9 12 00 00 00 ... F3 A5 ... FF 52 44`
-     * (lea edi, +0x20; mov ecx, 0x12; rep movsd; call [edx+0x44]). */
-    bool ok_fc90 = false;
-    {
-        DWORD f9 = xiloader::functions::FindPattern(mod,
-            (const unsigned char*)"\x8B\x54\x24\x08\x8B\xC1\x8B\x4C\x24\x04\x56\x8B\x74\x24\x10"
-                                  "\x89\x48\x18\x8B\x4C\x24\x14\x57\x89\x48\x14\x8D\x78\x20"
-                                  "\xB9\x12\x00\x00\x00\x89\x50\x1C\x8B\x10\xF3\xA5\x8B\xC8"
-                                  "\xFF\x52\x44\x5F\x5E\xC2\x10\x00",
-            "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx");
-        if (f9)
-        {
-            OFF_FC90 = f9 - baseAddr;
-            ok_fc90 = true;
-            resolved++;
-        }
-        else
-        {
-            xiloader::console::output(xiloader::color::error,
-                "FriendSys: FC90 (submenu open) pattern FAILED to resolve");
-        }
-    }
-
-    /* friend_err_cb (FUN_0480F450) -- friend-system error callback. Dispatches
-     * on result code 0/1/else with DAT msg cat=10 msg=0x6F ("Failed to send
-     * reply. (NN)"). Prologue: `MOV ECX,[ESP+0xC]; SUB ESP,0x20; MOV EAX,ECX;
-     * MOV BYTE [INBOX_INIT_DONE],0; SUB EAX,0; JE +0x34; DEC EAX; JE +0x4E;
-     * PUSH ECX; PUSH 0x6F; PUSH 0xA`. The `6A 6F 6A 0A` (push 0x6F msg_id;
-     * push 0xA cat) is the befriend-error fingerprint. */
-    bool ok_err_cb = false;
-    {
-        DWORD ec = xiloader::functions::FindPattern(mod,
-            (const unsigned char*)"\x8B\x4C\x24\x0C\x83\xEC\x20\x8B\xC1\xC6\x05\x00\x00\x00\x00"
-                                  "\x00\x83\xE8\x00\x74\x34\x48\x74\x4E\x51\x6A\x6F\x6A\x0A",
-            "xxxxxxxxxxx?????xxxxxxxxxxxxx");
-        if (ec)
-        {
-            OFF_FRIEND_ERR_CB = ec - baseAddr;
-            ok_err_cb = true;
-            resolved++;
-        }
-        else
-        {
-            xiloader::console::output(xiloader::color::error,
-                "FriendSys: friend_err_cb pattern FAILED to resolve");
-        }
-    }
-
     /* friend_submit (FUN_0480F550) -- friend-system submit (chat_obj, src, type).
      * Prologue starts with `MOV AL, [INBOX_INIT_DONE]; TEST AL,AL; JE +0x10;
      * MOV ECX, [chat_log]; PUSH 0x7A; CALL; RET 8`. The `6A 7A C2 08 00`
@@ -3388,104 +1848,6 @@ static bool resolve_ffximain_offsets(uint8_t* base)
         {
             xiloader::console::output(xiloader::color::error,
                 "FriendSys: friend_submit pattern FAILED to resolve");
-        }
-    }
-
-    /* friend_real_send (FUN_04702210) -- network submit chokepoint. Returns
-     * 0x10 if `this+0x20` is NULL (no conn). Then: increment counter at
-     * `this+8` with 0/1 overflow check, forward 10 stack args. Prologue:
-     * `MOV EAX,ECX; MOV ECX,[EAX+0x20]; TEST ECX,ECX; JNE +8; MOV EAX,0x10;
-     * RET 0x28; INC WORD [EAX+8]; CMP WORD [EAX+8],0; JNE +6;
-     * MOV WORD [EAX+8],1`. The 16-bit counter increment-with-overflow at
-     * +8 is unique. */
-    bool ok_real_send = false;
-    {
-        DWORD rs = xiloader::functions::FindPattern(mod,
-            (const unsigned char*)"\x8B\xC1\x8B\x48\x20\x85\xC9\x75\x08\xB8\x10\x00\x00\x00\xC2\x28\x00"
-                                  "\x66\xFF\x40\x08\x66\x83\x78\x08\x00\x75\x06\x66\xC7\x40\x08\x01\x00",
-            "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx");
-        if (rs)
-        {
-            OFF_FRIEND_REAL_SEND = rs - baseAddr;
-            ok_real_send = true;
-            resolved++;
-        }
-        else
-        {
-            xiloader::console::output(xiloader::color::error,
-                "FriendSys: friend_real_send pattern FAILED to resolve");
-        }
-    }
-
-    /* friend_inner_send (FUN_04703150) -- common inner sender. Writes to
-     * thisstruct fields at +0x8 (op_table ptr), +0x105A (status word), and
-     * +0x105C (handler pointer). The store-pair at +0x105A/+0x105C (large
-     * struct offsets in 4188-byte char struct) is uniquely identifying:
-     * `66 89 BE 5A 10 00 00 89 86 5C 10 00 00`. */
-    bool ok_inner_send = false;
-    {
-        DWORD is = xiloader::functions::FindPattern(mod,
-            (const unsigned char*)"\x8B\x44\x24\x04\x56\x57\x8B\xF1\x33\xFF\x3B\xC7\x89\x7E\x08"
-                                  "\x66\x89\xBE\x5A\x10\x00\x00\x89\x86\x5C\x10\x00\x00\x74\x2C",
-            "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxx");
-        if (is)
-        {
-            OFF_FRIEND_INNER_SEND = is - baseAddr;
-            ok_inner_send = true;
-            resolved++;
-        }
-        else
-        {
-            xiloader::console::output(xiloader::color::error,
-                "FriendSys: friend_inner_send pattern FAILED to resolve");
-        }
-    }
-
-    /* dismiss_op1_send (FUN_047059D0) -- op[1] state-2 callback that produces
-     * wire traffic. Prologue: `SUB ESP,0x48; PUSH EBX; MOV EBX,[ESP+0x54];
-     * PUSH ESI; MOV ESI,[ESP+0x54]; TEST EBX,EBX; JNE +0x24; XOR EAX,EAX;
-     * PUSH EDI; LEA EDX,[ESI+0xC48]`. The `8D 96 48 0C 00 00` (LEA into
-     * +0xC48 of `this` -- 3144 bytes into a struct) is uniquely large + the
-     * surrounding stack frame structure. */
-    bool ok_dismiss_op1 = false;
-    {
-        DWORD d1 = xiloader::functions::FindPattern(mod,
-            (const unsigned char*)"\x83\xEC\x48\x53\x8B\x5C\x24\x54\x56\x8B\x74\x24\x54\x85\xDB"
-                                  "\x75\x24\x33\xC0\x57\x8D\x96\x48\x0C\x00\x00",
-            "xxxxxxxxxxxxxxxxxxxxxxxxxx");
-        if (d1)
-        {
-            OFF_DISMISS_OP1_SEND = d1 - baseAddr;
-            ok_dismiss_op1 = true;
-            resolved++;
-        }
-        else
-        {
-            xiloader::console::output(xiloader::color::error,
-                "FriendSys: dismiss_op1_send pattern FAILED to resolve");
-        }
-    }
-
-    /* dismiss_submit (FUN_0480FBB0) -- Reply/Ignore handler for op code 0x16.
-     * Prologue: `MOV AL, [INBOX_INIT_DONE]; SUB ESP, 0x80; TEST AL,AL;
-     * PUSH ESI; MOV ESI,ECX; JE +0x17`. The 0x80 stack frame + byte-test +
-     * thiscall this-load discriminate. NOTE: existing OFF was 0x80FBB0
-     * (wrong base 0x04000000); correct RVA is 0x1FFBB0. */
-    bool ok_dismiss_sub = false;
-    {
-        DWORD ds = xiloader::functions::FindPattern(mod,
-            (const unsigned char*)"\xA0\x00\x00\x00\x00\x81\xEC\x80\x00\x00\x00\x84\xC0\x56\x8B\xF1\x74\x17",
-            "x????xxxxxxxxxxxxx");
-        if (ds)
-        {
-            OFF_DISMISS_SUBMIT = ds - baseAddr;
-            ok_dismiss_sub = true;
-            resolved++;
-        }
-        else
-        {
-            xiloader::console::output(xiloader::color::error,
-                "FriendSys: dismiss_submit pattern FAILED to resolve");
         }
     }
 
@@ -3516,125 +1878,6 @@ static bool resolve_ffximain_offsets(uint8_t* base)
         {
             xiloader::console::output(xiloader::color::error,
                 "FriendSys: msg_dismiss_action pattern FAILED to resolve");
-        }
-    }
-
-    /* dismiss_outer (FUN_04707430) -- Read submit wrapper. Same early-return-2
-     * shape as befriend_outer but disambiguated by stack arg position:
-     * dismiss reads `[ESP+0x18]` (4 stack args) vs befriend's `[ESP+0x24]`
-     * (8 stack args). Pattern: `8B 0D [conn_state] 85 C9 75 06 B8 02 00 00
-     * 00 C3 8B 44 24 18 8B 54 24 14`. */
-    bool ok_dismiss_outer = false;
-    {
-        DWORD doo = xiloader::functions::FindPattern(mod,
-            (const unsigned char*)"\x8B\x0D\x00\x00\x00\x00\x85\xC9\x75\x06\xB8\x02\x00\x00\x00\xC3"
-                                  "\x8B\x44\x24\x18\x8B\x54\x24\x14",
-            "xx????xxxxxxxxxxxxxxxxxx");
-        if (doo)
-        {
-            OFF_DISMISS_OUTER = doo - baseAddr;
-            ok_dismiss_outer = true;
-            resolved++;
-        }
-        else
-        {
-            xiloader::console::output(xiloader::color::error,
-                "FriendSys: dismiss_outer pattern FAILED to resolve");
-        }
-    }
-
-    /* befriend_inner (FUN_04703560) -- __thiscall inner submit. Prologue:
-     * `PUSH ESI; MOV ESI,ECX; CMP WORD [ESI+0x1058],0; JE +9; MOV EAX,3;
-     * POP ESI; RET 0x2C`. The 0x1058 struct offset (a busy flag) + return
-     * code 3 + RET 0x2C (11 stack args + this) is uniquely specific. */
-    bool ok_befriend_inner = false;
-    {
-        DWORD bi = xiloader::functions::FindPattern(mod,
-            (const unsigned char*)"\x56\x8B\xF1\x66\x83\xBE\x58\x10\x00\x00\x00\x74\x09"
-                                  "\xB8\x03\x00\x00\x00\x5E\xC2\x2C\x00",
-            "xxxxxxxxxxxxxxxxxxxxxx");
-        if (bi)
-        {
-            OFF_FFXI_BEFRIEND_INNER = bi - baseAddr;
-            ok_befriend_inner = true;
-            resolved++;
-        }
-        else
-        {
-            xiloader::console::output(xiloader::color::error,
-                "FriendSys: befriend_inner pattern FAILED to resolve");
-        }
-    }
-
-    /* befriend_outer (FUN_04706FD0) -- early-return-2-if-conn-null wrapper,
-     * forwards 8 stack args + push 3 to inner. Prologue: `MOV ECX,
-     * [CONN_STATE]; TEST ECX,ECX; JNE +6; MOV EAX,2; RET; MOV EAX,[ESP+0x24]`.
-     * The `75 06 B8 02 00 00 00 C3` early-out (return 2) + immediate
-     * arg-forwarding via `8B 44 24 24` is the discriminator. */
-    bool ok_befriend_outer = false;
-    {
-        DWORD bo = xiloader::functions::FindPattern(mod,
-            (const unsigned char*)"\x8B\x0D\x00\x00\x00\x00\x85\xC9\x75\x06\xB8\x02\x00\x00\x00\xC3"
-                                  "\x8B\x44\x24\x24",
-            "xx????xxxxxxxxxxxxxx");
-        if (bo)
-        {
-            OFF_FFXI_BEFRIEND_OUTER = bo - baseAddr;
-            ok_befriend_outer = true;
-            resolved++;
-        }
-        else
-        {
-            xiloader::console::output(xiloader::color::error,
-                "FriendSys: befriend_outer pattern FAILED to resolve");
-        }
-    }
-
-    /* chat_append (FUN_04737AA0) -- __thiscall per-line chat appender. Prologue
-     * (after Detours JMP relocation): `PUSH EBX; PUSH EBP; PUSH ESI; PUSH EDI;
-     * MOV EBP,ECX; PUSH 8; PUSH 0; MOV [ESP+0x1C],EBP; CALL rel32; MOV EDI,
-     * [ESP+0x864]`. The `8B BC 24 64 08 00 00` (MOV EDI, [ESP+0x864] -- 2148
-     * byte stack offset) is a uniquely-large local frame, definitive marker. */
-    bool ok_chat_append = false;
-    {
-        DWORD ca = xiloader::functions::FindPattern(mod,
-            (const unsigned char*)"\x53\x55\x56\x57\x8B\xE9\x6A\x08\x6A\x00\x89\x6C\x24\x1C"
-                                  "\xE8\x00\x00\x00\x00\x8B\xBC\x24\x64\x08\x00\x00",
-            "xxxxxxxxxxxxxxx????xxxxxxx");
-        if (ca)
-        {
-            OFF_CHAT_APPEND = ca - baseAddr;
-            ok_chat_append = true;
-            resolved++;
-        }
-        else
-        {
-            xiloader::console::output(xiloader::color::error,
-                "FriendSys: chat_append pattern FAILED to resolve");
-        }
-    }
-
-    /* show_error (FUN_04728A00) -- __thiscall(this, msg_id) error/notification
-     * dispatcher. Prologue: `PUSH ECX; PUSH ESI; LEA ESI,[ECX+0x14]; PUSH EDI;
-     * MOV ECX,ESI; CALL <method>; TEST EAX,EAX; MOV [ESP+8],EAX; JE +0x38`.
-     * The `8D 71 14` (LEA into +0x14 sub-object) + `74 38` (specific JE
-     * displacement) discriminate. */
-    bool ok_show_error = false;
-    {
-        DWORD se = xiloader::functions::FindPattern(mod,
-            (const unsigned char*)"\x51\x56\x8D\x71\x14\x57\x8B\xCE\xE8\x00\x00\x00\x00"
-                                  "\x85\xC0\x89\x44\x24\x08\x74\x38",
-            "xxxxxxxxx????xxxxxxxx");
-        if (se)
-        {
-            OFF_SHOW_ERROR = se - baseAddr;
-            ok_show_error = true;
-            resolved++;
-        }
-        else
-        {
-            xiloader::console::output(xiloader::color::error,
-                "FriendSys: show_error pattern FAILED to resolve");
         }
     }
 
@@ -3753,56 +1996,11 @@ static bool resolve_ffximain_offsets(uint8_t* base)
         }
     }
 
-    bool all_ok = ok_populate && ok_teardown && ok_inbox_row && ok_dat_msg &&
-                  ok_befriend_hnd && ok_conn_init && ok_msg_process &&
-                  ok_char_init && ok_inbox_enum && ok_op_send && ok_flistmai &&
-                  ok_show_error && ok_chat_append && ok_befriend_outer &&
-                  ok_befriend_inner && ok_dismiss_outer && ok_dismiss_action &&
-                  ok_dismiss_sub && ok_dismiss_op1 && ok_inner_send &&
-                  ok_friend_submit && ok_err_cb && ok_fc90 && ok_dismiss_op2 &&
-                  ok_dismiss_cb && ok_queue_drv && ok_display_cb && ok_sys_init &&
-                  ok_real_send && ok_full_init && ok_store3;
+    bool all_ok = ok_populate &&
+                  ok_char_init && ok_inbox_enum && ok_flistmai && ok_dismiss_action &&
+                  ok_friend_submit && ok_display_cb && ok_full_init && ok_store3;
     xiloader::console::output(all_ok ? xiloader::color::success : xiloader::color::warning,
-        "FriendSys: ffximain offsets resolved: populate=%s teardown=%s "
-        "inbox_row=%s dat_msg=%s befriend_hnd=%s conn_init=%s msg_proc=%s "
-        "char_init=%s inbox_enum=%s op_send=%s flistmai=%s show_err=%s "
-        "chat_append=%s befriend_outer=%s befriend_inner=%s dismiss_outer=%s "
-        "dismiss_action=%s dismiss_sub=%s dismiss_op1=%s inner_send=%s "
-        "friend_submit=%s err_cb=%s fc90=%s dismiss_op2=%s dismiss_cb=%s "
-        "queue_drv=%s display_cb=%s sys_init=%s real_send=%s "
-        "full_init=%s store3=%s (%d/36)",
-        ok_populate       ? "ok" : "FAIL",
-        ok_teardown       ? "ok" : "FAIL",
-        ok_inbox_row      ? "ok" : "FAIL",
-        ok_dat_msg        ? "ok" : "FAIL",
-        ok_befriend_hnd   ? "ok" : "FAIL",
-        ok_conn_init      ? "ok" : "FAIL",
-        ok_msg_process    ? "ok" : "FAIL",
-        ok_char_init      ? "ok" : "FAIL",
-        ok_inbox_enum     ? "ok" : "FAIL",
-        ok_op_send        ? "ok" : "FAIL",
-        ok_flistmai       ? "ok" : "FAIL",
-        ok_show_error     ? "ok" : "FAIL",
-        ok_chat_append    ? "ok" : "FAIL",
-        ok_befriend_outer ? "ok" : "FAIL",
-        ok_befriend_inner ? "ok" : "FAIL",
-        ok_dismiss_outer  ? "ok" : "FAIL",
-        ok_dismiss_action ? "ok" : "FAIL",
-        ok_dismiss_sub    ? "ok" : "FAIL",
-        ok_dismiss_op1    ? "ok" : "FAIL",
-        ok_inner_send     ? "ok" : "FAIL",
-        ok_friend_submit  ? "ok" : "FAIL",
-        ok_err_cb         ? "ok" : "FAIL",
-        ok_fc90           ? "ok" : "FAIL",
-        ok_dismiss_op2    ? "ok" : "FAIL",
-        ok_dismiss_cb     ? "ok" : "FAIL",
-        ok_queue_drv      ? "ok" : "FAIL",
-        ok_display_cb     ? "ok" : "FAIL",
-        ok_sys_init       ? "ok" : "FAIL",
-        ok_real_send      ? "ok" : "FAIL",
-        ok_full_init      ? "ok" : "FAIL",
-        ok_store3         ? "ok" : "FAIL",
-        resolved);
+        "FriendSys: FFXiMain offsets resolved (%d)", resolved);
     return all_ok;
 }
 
@@ -3847,9 +2045,6 @@ static void apply_notification_overlay_patches()
      * from rendering. Resolution stays for visibility; flip is not applied. */
     if (OFF_TICK_KILLER_JGE != 0)
     {
-        xiloader::console::output_to_channel("friend",
-            "NotifOverlay: tick-killer resolved at +0x%06X (patch deferred pending investigation)",
-            OFF_TICK_KILLER_JGE);
     }
 
     uint32_t* tick_enable   = (uint32_t*)(s_polBase + OFF_TICK_ENABLE);
@@ -3882,8 +2077,6 @@ static void apply_notification_overlay_patches()
     *(int32_t*)(notif_struct + 0x334) = 0;
     *(int32_t*)(notif_struct + 0x33C) = 1;    /* non-zero avoids POL-1024 */
     uint32_t* notif_mgr = (uint32_t*)(s_ffxiBase + OFF_NOTIF_MGR_PTR);
-    xiloader::console::output_to_channel("friend",
-        "NotifOverlay: notification manager = 0x%08X", *notif_mgr);
     if (*notif_mgr == 0)
     {
         xiloader::console::output(xiloader::color::warning,
@@ -3909,19 +2102,11 @@ static void apply_notification_overlay_patches()
         else
             origin = "other module";
     }
-    xiloader::console::output_to_channel("friend",
-        "NotifCBProbe: pol+0x%X was 0x%08X [%s]%s -> writing 0x%08X",
-        OFF_CALLBACK_PTR, cb_before, origin,
-        (cb_before != 0 && cb_before != cb_target) ? " (CLOBBERING)" : "",
-        cb_target);
 
     *callback_ptr = cb_target;
     s_notif_cb_expected = cb_target;
 
     s_notif_overlay_applied = true;
-    xiloader::console::output_to_channel("friend",
-        "NotifOverlay: enabled (struct_idx=0, callback=0x%08X, mgr=0x%08X)",
-        cb_target, *notif_mgr);
 }
 
 /* Inject a notification and set S:/R: counter values. */
@@ -4032,9 +2217,6 @@ static void write_handle_array()
     if (!s_logged_idx)
     {
         s_logged_idx = true;
-        xiloader::console::output_to_channel("friend",
-            "FriendSys: handle_index at polcore+0x%X: %08X -> 00000000",
-            OFF_HANDLE_INDEX, before);
     }
 
     /* Friend handles at sequential indices 1..63. handle[0..7] is the
@@ -4206,9 +2388,6 @@ static bool flistmai_init_for_befriend()
     uint32_t slot_count = *(uint32_t*)((uintptr_t)flistmai + 0x50);
     uint32_t render_arr = *(uint32_t*)((uintptr_t)flistmai + 0x5C);
     uint32_t display_arr = *(uint32_t*)((uintptr_t)flistmai + 0x60);
-    xiloader::console::output_to_channel("friend",
-        "FlistmaiSetup: ok -- slot_count=%u render=0x%08X display=0x%08X",
-        slot_count, render_arr, display_arr);
     s_done = true;
     return true;
 }
@@ -4373,8 +2552,6 @@ static void gate_keeper()
 
             write_handle_array();
 
-            xiloader::console::output_to_channel("friend",
-                "FriendSys: deferred populate completed");
         }
     }
 }
@@ -4596,8 +2773,6 @@ static void do_sync_status()
     /* Step 6: write handle array. */
     write_handle_array();
 
-    xiloader::console::output_to_channel("friend",
-        "FriendSys: sync complete");
 }
 
 /* Message file writing -- filesystem-based delivery. Retail persists messages
@@ -4636,45 +2811,6 @@ static void read_polcore_filename_iv(uint32_t& iv_lo, uint32_t& iv_hi)
         iv_lo = *(uint32_t*)(s_polBase + OFF_POL_IV_LO);
         iv_hi = *(uint32_t*)(s_polBase + OFF_POL_IV_HI);
     }
-}
-
-/* SEH-protected dword read. File scope because __try cannot live in
- * functions that use C++ object unwinding (C2712). */
-static uint32_t safe_read_dword_at(uint32_t addr)
-{
-    __try {
-        return *(uint32_t*)(uintptr_t)addr;
-    } __except (EXCEPTION_EXECUTE_HANDLER) {
-        return 0xDEADBEEF;
-    }
-}
-
-/* Identify which loaded module an address falls in. Writes
- * "<modname>+0x<rva>" or "unknown" into the caller-supplied buffer. */
-static void classify_addr(uint32_t addr, char* out, size_t out_sz)
-{
-    struct Mod { HMODULE h; const char* name; };
-    Mod mods[] = {
-        { GetModuleHandleA("polcore.dll"),    "polcore" },
-        { GetModuleHandleA("polcoreeu.dll"),  "polcoreeu" },
-        { GetModuleHandleA("FFXiMain.dll"),   "FFXi" },
-        { GetModuleHandleA("FFXiMaineu.dll"), "FFXieu" },
-        { GetModuleHandleA(NULL),             "self" },
-        { GetModuleHandleA("Ashita.dll"),     "Ashita" },
-        { GetModuleHandleA("Ashita-x86.dll"), "Ashita-x86" },
-    };
-    for (auto& m : mods)
-    {
-        if (m.h == nullptr) continue;
-        uintptr_t base = (uintptr_t)m.h;
-        if (addr >= base && addr < base + 0x800000)
-        {
-            _snprintf_s(out, out_sz, _TRUNCATE, "%s+0x%X",
-                m.name, (uint32_t)(addr - base));
-            return;
-        }
-    }
-    _snprintf_s(out, out_sz, _TRUNCATE, "unknown");
 }
 
 /* Build the 72-byte filename metadata block.
@@ -4809,8 +2945,6 @@ static bool write_msg_file(NotifMessage& nm)
     WriteFile(hFile, body.c_str(), body_size, &written, NULL);
     CloseHandle(hFile);
 
-    xiloader::console::output_to_channel("friend",
-        "FriendSys: wrote msg file '%s' (%d bytes)", filename.c_str(), (int)written);
     return true;
 }
 
@@ -4876,9 +3010,6 @@ static void sweep_dismissed_messages()
     {
         if (it->filename[0] != '\0' && a_files.count(it->filename))
         {
-            xiloader::console::output_to_channel("friend",
-                "FriendSys: msg dismissed natively (b->a) -- '%s' subj='%s'",
-                it->filename, it->subject);
             it = s_cached_messages.erase(it);
             dismissed++;
         }
@@ -4949,9 +3080,6 @@ static void write_notification_files()
                 if (file_count > 0)
                 {
                     *(uint16_t*)(mgr + 0x0A) = (uint16_t)file_count;
-                    xiloader::console::output_to_channel("friend",
-                        "FriendSys: set notif count = %d (mgr=0x%08X)",
-                        file_count, mgr_ptr);
                 }
             }
         }
@@ -5046,13 +3174,8 @@ static bool ensure_native_msg_obj()
     VirtualProtect(call2, SHOW_MENU_CALL_LEN, PAGE_EXECUTE_READWRITE, &prot2);
     memcpy(saved2, call2, SHOW_MENU_CALL_LEN);
     memset(call2, 0x90, SHOW_MENU_CALL_LEN);
-    xiloader::console::output_to_channel("friend",
-        "FriendSys: full_init show_menu NOP'd at +0x%X and +0x%X (19B each)",
-        OFF_FULL_INIT_VIS1 - 3, OFF_FULL_INIT_VIS2 - 3);
 
     int file_count = count_msg_files();
-    xiloader::console::output_to_channel("friend",
-        "FriendSys: ensure_native_msg_obj: %d files in msg\\r\\b\\", file_count);
 
     __try
     {
@@ -5068,15 +3191,6 @@ static bool ensure_native_msg_obj()
         *(uint32_t*)(obj + 0x1C) = 0;
         *(uint16_t*)(obj + 0x20) = 0;
 
-        xiloader::console::output_to_channel("friend",
-            "FriendSys: native msg_obj initialized at 0x%08X (render=0x%08X, data=0x%08X, arg1=%d, +0x18=%u, +0x54=%u, +0x58=%d)",
-            native_ptr,
-            *(uint32_t*)(obj + 0x68),
-            *(uint32_t*)(obj + 0x6C),
-            file_count,
-            (uint32_t)*(uint16_t*)(obj + 0x18),
-            *(uint32_t*)(obj + 0x54),
-            *(uint32_t*)(obj + 0x58));
     }
     __except(EXCEPTION_EXECUTE_HANDLER)
     {
@@ -5088,8 +3202,6 @@ static bool ensure_native_msg_obj()
     VirtualProtect(call1, SHOW_MENU_CALL_LEN, prot1, &prot1);
     memcpy(call2, saved2, SHOW_MENU_CALL_LEN);
     VirtualProtect(call2, SHOW_MENU_CALL_LEN, prot2, &prot2);
-    xiloader::console::output_to_channel("friend",
-        "FriendSys: full_init show_menu bytes restored");
 
 
     return s_native_msg_init;
@@ -5150,87 +3262,10 @@ static void try_start_callerC()
     strncpy(s_befriend_target_charname, req.charname.c_str(), 15);
     strncpy(s_befriend_target_nickname, req.nickname.c_str(), 15);
 
-    xiloader::console::output_to_channel("friend",
-        "FriendSys: CallerC befriend '%s' nick='%s'",
-        s_befriend_target_charname, s_befriend_target_nickname);
-
     if (!init_callerC_slot())
         return;
 
     s_callerC_is_notification = false;
-    xiloader::console::output_to_channel("friend",
-        "FriendSys: CallerC slot %d (befriend)", s_callerC_slot);
-}
-
-/* Direct ACPT (accept) request to the profile server, bypassing polcore's
- * CallerC pump. Server creates the friendship and marks the related
- * friend-request message as read. Returns true on status=0. */
-static bool send_acpt_request(const char* target_charname, const char* nickname)
-{
-    if (globals::g_AccountId == 0 || s_FriendPort == 0 || target_charname == nullptr)
-        return false;
-
-    SOCKET sock = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
-    if (sock == INVALID_SOCKET)
-    {
-        xiloader::console::output(xiloader::color::error,
-            "ACPT: socket() failed: %d", WSAGetLastError());
-        return false;
-    }
-    DWORD timeout_ms = 2000;
-    setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, (const char*)&timeout_ms, sizeof(timeout_ms));
-    setsockopt(sock, SOL_SOCKET, SO_SNDTIMEO, (const char*)&timeout_ms, sizeof(timeout_ms));
-
-    sockaddr_in addr = {};
-    addr.sin_family = AF_INET;
-    addr.sin_addr.s_addr = inet_addr("127.0.0.1");
-    addr.sin_port = htons(static_cast<u_short>(s_FriendPort));
-    if (connect(sock, (sockaddr*)&addr, sizeof(addr)) != 0)
-    {
-        xiloader::console::output(xiloader::color::warning,
-            "ACPT: connect failed WSA=%d", WSAGetLastError());
-        closesocket(sock);
-        return false;
-    }
-
-    /* ACPT packet (40B padded). Server dispatches by 'ACPT' magic, parses
-     * [4..7]=accid, [8..22]=target, [23..37]=nick. */
-    uint8_t packet[40] = {};
-    memcpy(packet, "ACPT", 4);
-    *(uint32_t*)(packet + 4) = globals::g_AccountId;
-    strncpy((char*)(packet + 8), target_charname, 15);
-    if (nickname && nickname[0])
-        strncpy((char*)(packet + 23), nickname, 15);
-
-    int sent = send(sock, (const char*)packet, 40, 0);
-    if (sent != 40)
-    {
-        xiloader::console::output(xiloader::color::warning,
-            "ACPT: send returned %d (WSA=%d)", sent, WSAGetLastError());
-        closesocket(sock);
-        return false;
-    }
-
-    uint8_t resp[5] = {};
-    int got = recv(sock, (char*)resp, sizeof(resp), 0);
-    closesocket(sock);
-    if (got < 5 || memcmp(resp, "ACPT", 4) != 0)
-    {
-        xiloader::console::output(xiloader::color::warning,
-            "ACPT: bad response (got=%d bytes, magic=0x%08X)", got, *(uint32_t*)resp);
-        return false;
-    }
-    uint8_t status = resp[4];
-    if (status == 0)
-    {
-        xiloader::console::output_to_channel("friend",
-            "ACPT: server accepted friendship target='%s' nick='%s'",
-            target_charname, nickname ? nickname : "");
-        return true;
-    }
-    xiloader::console::output(xiloader::color::warning,
-        "ACPT: server returned status=%u (target='%s')", status, target_charname);
-    return false;
 }
 
 
@@ -5244,10 +3279,6 @@ static void pump_callerC()
     if (desc[0] == 0)
     {
 
-        xiloader::console::output_to_channel("friend",
-            "FriendSys: CallerC %s completed (%d pumps)",
-            s_callerC_is_notification ? "notification" : "befriend",
-            s_callerC_pumps);
         s_callerC_slot = -1;
         s_callerC_active = false;
         s_callerC_is_notification = false;
@@ -5547,12 +3578,6 @@ static int bridge_msgrec_to_notif_queue(const uint8_t* buf, uint32_t count)
         memcpy(nm.sender,  e + 0x20, 15);
         memcpy(nm.subject, e + 0x30, 13);
 
-        xiloader::console::output_to_channel("friend",
-            "FriendSys: MsgRecRecv[%u] from=%u id=%u type=%u ts=%u "
-            "sender='%s' subj='%s' flag=%04X",
-            i, nm.from_accid, nm.msg_id, nm.msg_type, nm.timestamp,
-            nm.sender, nm.subject, *(uint16_t*)(e + 0x3E));
-
         /* A record with no sender and no subject carries nothing renderable;
          * queueing it writes a blank inbox row. */
         if (nm.sender[0] == 0 && nm.subject[0] == 0)
@@ -5615,8 +3640,6 @@ static void pump_msgrec_recv()
         int bridged = bridge_msgrec_to_notif_queue(s_msgrec_buf, actual_count);
         if (bridged > 0)
         {
-            xiloader::console::output_to_channel("friend",
-                "FriendSys: MsgRecRecv bridged %d notification(s) to s_notif_queue", bridged);
             write_notification_files();
         }
         s_msgrec_slot = -1;
@@ -5685,10 +3708,8 @@ static void try_start_whois(uint32_t target_accid)
     uint8_t* desc = s_polBase + OFF_DESC_ARRAY + slot * OFF_DESC_STRIDE;
     desc[0x0B] = 0;
 
-    /* The init zeroed the 0x18B query buffer at *(slot+0x328). Write the
-     * target accid at offset 0 as a first-pass hypothesis; if the wire shape
-     * shows a different field placement (e.g. charname at offset 4..0x13),
-     * update here once we observe what the SM actually sends. */
+    /* The init zeroed the 0x18B query buffer at *(slot+0x328); the target
+     * accid goes at offset 0. */
     uint8_t* req_buf = (uint8_t*)*(uint32_t*)(desc + 0x328);
     if (req_buf != nullptr)
     {
@@ -5763,12 +3784,8 @@ static void pump_whois()
                     char hex[64 * 3 + 1] = {};
                     for (int b = 0; b < 64; b++)
                         sprintf_s(hex + b * 3, 4, "%02x ", rb[b]);
-                    xiloader::console::output_to_channel("friend",
-                        "FriendSys: WhoIs recv_buf[0..64]: %s", hex);
                     for (int b = 0; b < 64; b++)
                         sprintf_s(hex + b * 3, 4, "%02x ", rb[64 + b]);
-                    xiloader::console::output_to_channel("friend",
-                        "FriendSys: WhoIs recv_buf[64..128]: %s", hex);
                 }
                 __except(EXCEPTION_EXECUTE_HANDLER) {}
             }
@@ -5785,11 +3802,6 @@ static void pump_whois()
         uint32_t r_acct_index  = *(uint32_t*)(s_polBase + 0x7541C);
         uint32_t r_subindex    = *(uint32_t*)(s_polBase + 0x75420);
         uint32_t r_count_m1    = *(uint32_t*)(s_polBase + 0x75424);
-        xiloader::console::output_to_channel("friend",
-            "FriendSys: WhoIs done %d pumps; target_accid=%u "
-            "online_flag=0x%08X acct_index=%d subindex=%u count-1=%u",
-            s_whois_pumps, s_whois_target_accid,
-            r_online_flag, (int32_t)r_acct_index, r_subindex, r_count_m1);
         s_whois_slot = -1;
         s_whois_active = false;
         return;
@@ -5860,8 +3872,6 @@ static void try_start_friend_status()
     s_friend_status_active = true;
     s_friend_status_pumps  = 0;
 
-    xiloader::console::output_to_channel("friend",
-        "FriendSys: friend_status started (slot %d)", slot);
 }
 
 static void pump_friend_status()
@@ -5923,10 +3933,6 @@ static void pump_friend_status()
         uint32_t s1_8  = *(uint32_t*)(arr2 + 1 * 0xB0 + 0x08);
         uint32_t s1_c  = *(uint32_t*)(arr2 + 1 * 0xB0 + 0x0C);
         uint32_t s1_98 = *(uint32_t*)(arr2 + 1 * 0xB0 + 0x98);
-        xiloader::console::output_to_channel("friend",
-            "FriendSys: friend_status done %d pumps; completion=0x%08X "
-            "Array2[1]+0x8=0x%08X +0xC=0x%08X +0x98=0x%08X",
-            s_friend_status_pumps, completion, s1_8, s1_c, s1_98);
         s_friend_status_slot = -1;
         s_friend_status_active = false;
         /* friend_status just refreshed Array2 (including the online field at
@@ -5983,12 +3989,7 @@ void friend_system::init()
     s_notif_pickup_pumps = 0;
     s_notif_pickup_done_once = false;
     s_msg_insert_failed = false;
-    s_pol_push_enabled = globals::g_EnablePolPush;
-    if (s_pol_push_enabled)
-        xiloader::console::output(xiloader::color::warning,
-            "FriendSys: POL push channel ENABLED (--pol-push). Experimental: this "
-            "has killed the client before.");
-    xiloader::console::output_to_channel("friend", "FriendSys: initialized");
+    s_pol_push_enabled = true;
 }
 
 /* Drive polcore's POL connection state machine far enough to open the push
@@ -6066,7 +4067,6 @@ static bool pol_push_provide_keys(int chan)
     void* bufA = alloc(pol_malloc, 16);
     if (bufA == nullptr)
     {
-        xiloader::console::output_to_channel("friend", "PolPush: polcore malloc failed");
         return false;
     }
     memset(bufA, 0, 16);
@@ -6079,9 +4079,6 @@ static bool pol_push_provide_keys(int chan)
     *(uint32_t*)(conn + CONN_KEY_MASK_A) = 0;
     *(uint16_t*)(conn + CONN_KEY_READY)  = 1;
 
-    xiloader::console::output_to_channel("friend",
-        "PolPush: chan %d keys supplied (A=%p len=16, state=0x%02X flags=0x%02X)",
-        chan, bufA, *(conn + CONN_STATE), *(conn + CONN_FLAGS));
     return true;
 }
 
@@ -6174,9 +4171,6 @@ static void pump_pol_push()
         *state = 0x12;
         const int rc = 0;
         s_seeded = true;
-        xiloader::console::output_to_channel("friend",
-            "PolPush: pol_set_conn_config(1) rc=%d, state 0x%08X -> 0x%08X",
-            rc, (unsigned)before, (unsigned)*state);
 
         /* Seed the pp host AFTER the config call, never before: that call
          * encodes the session seed into OFF_POL_KEY_BLOB with a length of
@@ -6334,8 +4328,6 @@ static void pump_pol_push()
             s_seeded = false;
             s_last_state = INT32_MIN;
             if (s_push_retries <= POL_PUSH_FAST_RETRIES + 1)
-                xiloader::console::output_to_channel("friend",
-                    "PolPush: channel lost, reconnecting (attempt %d)", s_push_retries);
             return;
         }
 
@@ -6380,19 +4372,9 @@ static void pump_pol_push()
     /* Connection creation (router state 0x16) zeroes the session-ready flag.
      * Put it back every tick -- cheap, and it must not stay clear even briefly
      * or in-flight friend operations abort with -5136. */
-    if (pol_session_ready_restore(s_polBase))
-        xiloader::console::output_to_channel("friend",
-            "PolPush: restored polcore session-ready flag cleared by connection setup");
+    pol_session_ready_restore(s_polBase);
 
-    int32_t now = *state;
-    if (now != s_last_state)
-    {
-        uint32_t handle = *(uint32_t*)(s_polBase + OFF_POL_CONN_HANDLE);
-        xiloader::console::output_to_channel("friend",
-            "PolPush: state 0x%X -> 0x%X (conn_handle=0x%08X)",
-            st, now, handle);
-        s_last_state = now;
-    }
+    s_last_state = *state;
 }
 
 static void update_overlay_count()
@@ -6412,8 +4394,6 @@ static void update_overlay_count()
     if (inject_notification(buf, static_cast<uint16_t>(effective), static_cast<uint16_t>(effective)))
     {
         s_overlay_last_notified_count = effective;
-        xiloader::console::output_to_channel("friend",
-            "NotifOverlay: S:1 R:%d", effective);
     }
 }
 
@@ -6445,8 +4425,6 @@ void friend_system::on_tick()
             if (hFFXi == NULL)
             {
                 if (s_wait_ticks % 300 == 0)
-                    xiloader::console::output_to_channel("friend",
-                        "FriendSys: waiting for FFXiMain.dll...");
                 s_wait_ticks++;
                 break;
             }
@@ -6455,8 +4433,6 @@ void friend_system::on_tick()
             if (hPol == NULL)
             {
                 if (s_wait_ticks % 300 == 0)
-                    xiloader::console::output_to_channel("friend",
-                        "FriendSys: waiting for polcore.dll...");
                 s_wait_ticks++;
                 break;
             }
@@ -6486,70 +4462,23 @@ void friend_system::on_tick()
                 break;
             }
 
-            /* Install friend-conn init/teardown hooks before any user
-             * interaction -- game-start fires the auto-init/teardown sequence
-             * before the Messages tab is ever opened. The downstream hook
-             * block installs too late to catch them. */
+            /* Private servers hand polcore an account id of 0/1 in the character
+             * record; friend rows built from it never match the real account.
+             * The hook substitutes g_AccountId before polcore sees it. */
             {
-                static bool s_early_friend_hooks = false;
-                if (!s_early_friend_hooks)
+                static bool s_char_record_hook = false;
+                if (!s_char_record_hook)
                 {
-                    Real_FriendConnInit     = (FnFriendConnInit)(s_ffxiBase + OFF_FRIEND_CONN_INIT);
-                    Real_FriendConnTeardown = (FnFriendConnTeardown)(s_ffxiBase + OFF_FRIEND_CONN_TEARDOWN);
+                    Real_CharRecordInit = (FnCharRecordInit)(s_ffxiBase + OFF_FFXI_CHAR_RECORD_INIT);
                     DetourTransactionBegin();
                     DetourUpdateThread(GetCurrentThread());
-                    DetourAttach(&(PVOID&)Real_FriendConnInit, (PVOID)Mine_FriendConnInit);
-                    DetourAttach(&(PVOID&)Real_FriendConnTeardown, (PVOID)Mine_FriendConnTeardown);
-                    if (DetourTransactionCommit() == NO_ERROR)
-                    {
-                        s_early_friend_hooks = true;
-                        xiloader::console::output_to_channel("friend",
-                            "FriendSys: early friend-conn init/teardown hooks installed");
-                    }
-                }
-            }
-
-            /* Install /befriend diagnostic hooks unconditionally at STATE_READY
-             * so they fire regardless of whether the user has opened the
-             * Messages tab. */
-            {
-                static bool s_befriend_diag_hooks = false;
-                if (!s_befriend_diag_hooks)
-                {
-                    Real_BefriendHandler  = (FnBefriendHandler)(s_ffxiBase + OFF_FFXI_BEFRIEND_HANDLER);
-                    Real_BefriendOuter    = (FnBefriendOuter)(s_ffxiBase + OFF_FFXI_BEFRIEND_OUTER);
-                    Real_BefriendInner    = (FnBefriendInner)(s_ffxiBase + OFF_FFXI_BEFRIEND_INNER);
-                    DetourTransactionBegin();
-                    DetourUpdateThread(GetCurrentThread());
-                    DetourAttach(&(PVOID&)Real_BefriendHandler,   (PVOID)Mine_BefriendHandler);
-                    DetourAttach(&(PVOID&)Real_BefriendOuter,      (PVOID)Mine_BefriendOuter);
-                    DetourAttach(&(PVOID&)Real_BefriendInner,      (PVOID)Mine_BefriendInner);
-                    Real_BefriendSubmit  = (FnBefriendSubmit)(s_ffxiBase + OFF_FFXI_BEFRIEND_SUBMIT);
-                    Real_BefriendOpSend  = (FnBefriendOpSend)(s_ffxiBase + OFF_FFXI_BEFRIEND_OP_SEND);
-                    Real_CharRecordInit  = (FnCharRecordInit)(s_ffxiBase + OFF_FFXI_CHAR_RECORD_INIT);
-                    DetourAttach(&(PVOID&)Real_BefriendSubmit,     (PVOID)Mine_BefriendSubmit);
-                    DetourAttach(&(PVOID&)Real_BefriendOpSend,     (PVOID)Mine_BefriendOpSend);
-                    DetourAttach(&(PVOID&)Real_CharRecordInit,     (PVOID)Mine_CharRecordInit);
-                    /* Mine_PolSendBodySm NOT attached: build 2026-07-02 changed
-                     * polcore_send_body_sm to an ESI-in convention (desc in ESI,
-                     * no stack prologue). A __cdecl Detour hook would forward
-                     * through the trampoline with the wrong register/stack state
-                     * and corrupt body-send (befriend / NotifPickup). The hook
-                     * is a no-op diagnostic, so it stays disabled until rewritten
-                     * as a naked ESI-preserving thunk. Offset still resolved. */
+                    DetourAttach(&(PVOID&)Real_CharRecordInit, (PVOID)Mine_CharRecordInit);
                     LONG commit = DetourTransactionCommit();
                     if (commit == NO_ERROR)
-                    {
-                        s_befriend_diag_hooks = true;
-                        xiloader::console::output_to_channel("friend",
-                            "FriendSys: /befriend diagnostic hooks installed early "
-                            "(handler/submit/op_send/dat_msg)");
-                    }
+                        s_char_record_hook = true;
                     else
-                    {
                         xiloader::console::output(xiloader::color::error,
-                            "FriendSys: early /befriend hook commit failed: %ld", commit);
-                    }
+                            "FriendSys: CharRecordInit hook commit failed: %ld", commit);
                 }
             }
 
@@ -6557,52 +4486,6 @@ void friend_system::on_tick()
 
             /* FFXiMain patches + notification overlay deferred to
              * STATE_ARRAY_SYNC, when Store3 != 0 confirms full game init. */
-
-            xiloader::console::output_to_channel("friend",
-                "FriendSys: ready (Store3=0x%08X, FFXi=0x%08X, pol=0x%08X), starting CallerB",
-                store3, (uint32_t)(uintptr_t)s_ffxiBase, (uint32_t)(uintptr_t)s_polBase);
-
-            /* Click-to-read gate: FUN_0491FD53 (mode=0 vs mode=16 in
-             * msg_process_handler) thunks through `*(DAT_04A65A24 + 0x43C)`.
-             * DAT_04A65A24 (FFXi+0x455A24) holds polcore's COM object ptr.
-             * Resolve and classify the gate function for RE. */
-            {
-                constexpr uint32_t OFF_DAT_04A65A24 = 0x455A24;
-                uint32_t pol_obj = *(uint32_t*)(s_ffxiBase + OFF_DAT_04A65A24);
-                xiloader::console::output_to_channel("friend",
-                    "ClickGate: DAT_04A65A24 (FFXi+0x%X) = polcore_obj=0x%08X",
-                    OFF_DAT_04A65A24, pol_obj);
-                if (pol_obj != 0)
-                {
-                    uint32_t fn_ptr = safe_read_dword_at(pol_obj + 0x43C);
-                    uint32_t vtable = safe_read_dword_at(pol_obj);
-
-                    /* C-style buffers -- enclosing on_tick uses __try
-                     * (no C++ unwinding allowed). */
-                    char fn_loc[64] = "unknown";
-                    char vt_loc[64] = "unknown";
-                    classify_addr(fn_ptr, fn_loc, sizeof(fn_loc));
-                    classify_addr(vtable, vt_loc, sizeof(vt_loc));
-
-                    xiloader::console::output_to_channel("friend",
-                        "ClickGate: pol_obj+0 (vtable) = 0x%08X (%s)", vtable, vt_loc);
-                    xiloader::console::output_to_channel("friend",
-                        "ClickGate: pol_obj+0x43C = 0x%08X (%s) <-- the gate function",
-                        fn_ptr, fn_loc);
-
-                    /* Dump neighboring fields -- +0x43C may be part of a
-                     * callback struct. */
-                    char hex[256] = {};
-                    int n = 0;
-                    for (int off = 0x430; off <= 0x450 && n < 240; off += 4)
-                    {
-                        uint32_t v = safe_read_dword_at(pol_obj + off);
-                        n += wsprintfA(hex + n, "+%X=%08X ", off, v);
-                    }
-                    xiloader::console::output_to_channel("friend",
-                        "ClickGate: pol_obj fields: %s", hex);
-                }
-            }
 
             s_state = STATE_READY;
             break;
@@ -6631,9 +4514,6 @@ void friend_system::on_tick()
                     if (v == 0)
                         xiloader::console::output(xiloader::color::warning,
                             "FriendSys: FFXi+0x%06X (%s) = NULL", p.off, p.name);
-                    else
-                        xiloader::console::output_to_channel("friend",
-                            "FriendSys: FFXi+0x%06X (%s) = 0x%08X", p.off, p.name, v);
                 }
             }
 
@@ -6667,8 +4547,6 @@ void friend_system::on_tick()
             s_pump_count = 0;
             s_inner_state_snapshot = -1;
             s_state = STATE_PUMPING;
-            xiloader::console::output_to_channel("friend",
-                "FriendSys: CallerB slot %d, pumping", s_pump_slot);
             break;
         }
 
@@ -6689,8 +4567,6 @@ void friend_system::on_tick()
                  * /befriend has a fully drawable flistmai to act on. */
                 flistmai_init_for_befriend();
 
-                xiloader::console::output_to_channel("friend",
-                    "FriendSys: CallerB done (%d pumps, %d synced)", s_pump_count, synced);
                 s_pump_count = 0;
                 s_consecutive_failures = 0;
                 s_state = STATE_ARRAY_SYNC;
@@ -6745,8 +4621,6 @@ void friend_system::on_tick()
                 uint16_t s3c = *(uint16_t*)((uint8_t*)(uintptr_t)store3_ptr + 0x132);
                 if (s3c > 0)
                 {
-                    xiloader::console::output_to_channel("friend",
-                        "FriendSys: Store 3 has %d entries, proceeding to sync", s3c);
                     s_state = STATE_SYNC;
                     break;
                 }
@@ -6754,8 +4628,6 @@ void friend_system::on_tick()
             s_pump_count++;
             if (s_pump_count > SETTLE_TICKS)  /* ~5s wait for Store3 */
             {
-                xiloader::console::output_to_channel("friend",
-                    "FriendSys: Store3 not available, proceeding to steady");
                 s_tick_counter = 0;
                 s_consecutive_failures = 0;
                 s_backoff_ticks = 0;
@@ -6771,9 +4643,6 @@ void friend_system::on_tick()
             s_consecutive_failures = 0;
             s_backoff_ticks = 0;
             s_state = STATE_STEADY;
-            xiloader::console::output_to_channel("friend",
-                "FriendSys: entering steady state (keepalive every %ds)",
-                KEEPALIVE_TICKS / 60);
             break;
         }
 
@@ -6821,9 +4690,6 @@ void friend_system::on_tick()
                     if (!s_notif_cb_drift_logged)
                     {
                         s_notif_cb_drift_logged = true;
-                        xiloader::console::output_to_channel("friend",
-                            "NotifCB: slot reclaimed from 0x%08X (stub) -> 0x%08X",
-                            *slot, s_notif_cb_expected);
                     }
                     *slot = s_notif_cb_expected;
                 }
@@ -6839,8 +4705,6 @@ void friend_system::on_tick()
                 nop_bytes(s_ffxiBase + OFF_POP_CHECK1,  2);
                 nop_bytes(s_ffxiBase + OFF_POP_CHECK2,  2);
                 s_patches_applied = true;
-                xiloader::console::output_to_channel("friend",
-                    "FriendSys: FFXiMain patches applied (deferred)");
             }
             apply_notification_overlay_patches();
 
@@ -6868,70 +4732,6 @@ void friend_system::on_tick()
                 {
                     s_flist_retry_ticks = 0;
                     flistmai_init_for_befriend();
-                }
-            }
-
-            /* One-shot probe of FFXi's command-line buffer (DAT_04A659A8 at
-             * FFXi+0x4559A8). Empty here means polcore isn't propagating
-             * SetParamInit args, so friend init can't read _pcnt and
-             * FUN_046FFFD0 bails. */
-            static bool s_cmdline_probed = false;
-            if (!s_cmdline_probed && s_ffxiBase != nullptr)
-            {
-                s_cmdline_probed = true;
-                __try {
-                    uint32_t cmd_ptr = *(uint32_t*)(s_ffxiBase + 0x4559A8);
-                    xiloader::console::output_to_channel("friend",
-                        "FFXiCmdProbe: DAT_04A659A8 (FFXi+0x4559A8) = 0x%08X",
-                        cmd_ptr);
-                    if (cmd_ptr != 0)
-                    {
-                        char buf[256] = {};
-                        strncpy(buf, (const char*)(uintptr_t)cmd_ptr, 255);
-                        buf[255] = '\0';
-                        xiloader::console::output_to_channel("friend",
-                            "FFXiCmdProbe: cmdline = '%s'", buf);
-                    }
-                    else
-                    {
-                        xiloader::console::output(xiloader::color::warning,
-                            "FFXiCmdProbe: cmd_ptr is NULL -> FFXi sees no args");
-                    }
-
-                    /* DAT_049E2C88 (FFXi+0x3D2C88) -- parsed args buffer
-                     * FUN_04611E30 fills. Non-null = arg parsing ran. */
-                    uint32_t parsed_ptr = *(uint32_t*)(s_ffxiBase + 0x3D2C88);
-                    xiloader::console::output_to_channel("friend",
-                        "FFXiCmdProbe: DAT_049E2C88 (parsed args) = 0x%08X",
-                        parsed_ptr);
-                    if (parsed_ptr != 0)
-                    {
-                        char buf[256] = {};
-                        strncpy(buf, (const char*)(uintptr_t)parsed_ptr, 255);
-                        buf[255] = '\0';
-                        xiloader::console::output_to_channel("friend",
-                            "FFXiCmdProbe: parsed = '%s'", buf);
-                    }
-
-                    /* Friend init chain "did it run?" globals. */
-                    uint32_t a9edf4 = *(uint32_t*)(s_ffxiBase + 0x48EDF4);   /* DAT_04A9EDF4 -- FUN_046E9240 done flag */
-                    uint32_t aefaec = *(uint32_t*)(s_ffxiBase + 0x4DFAEC);   /* DAT_04AEFAEC -- FUN_047121E0 buffer */
-                    uint32_t aefae8 = *(uint32_t*)(s_ffxiBase + 0x4DFAE8);   /* DAT_04AEFAE8 -- FUN_047121E0 buffer */
-                    uint32_t aee768 = *(uint32_t*)(s_ffxiBase + 0x4DE768);   /* DAT_04AEE768 -- FUN_046FFFD0 buffer */
-                    uint32_t a9ee08 = *(uint32_t*)(s_ffxiBase + 0x48EE08);   /* DAT_04A9EE08 -- FUN_046E9810 */
-                    uint32_t aee900 = *(uint32_t*)(s_ffxiBase + 0x4DE900);   /* DAT_04AEE900 -- FUN_04707550 / friend conn */
-                    xiloader::console::output_to_channel("friend",
-                        "FFXiInitProbe: A9EDF4=%08X (FUN_046E9240 done) "
-                        "AEFAEC=%08X AEFAE8=%08X (FUN_047121E0 buffers)",
-                        a9edf4, aefaec, aefae8);
-                    xiloader::console::output_to_channel("friend",
-                        "FFXiInitProbe: A9EE08=%08X (FUN_046E9810) "
-                        "AEE768=%08X (FUN_046FFFD0 buffer) "
-                        "AEE900=%08X (FUN_04707550 / friend conn)",
-                        a9ee08, aee768, aee900);
-                } __except (EXCEPTION_EXECUTE_HANDLER) {
-                    xiloader::console::output(xiloader::color::error,
-                        "FFXiCmdProbe: AV (0x%08X)", GetExceptionCode());
                 }
             }
 
@@ -6989,8 +4789,6 @@ void friend_system::on_tick()
                                 /* +0x1F0 */ 0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x65,0x6E,0x64,0x00,                      /* "end" */
                             };
                             memcpy(co + 0x0C, CHAT_TEMPLATE, sizeof(CHAT_TEMPLATE));
-                            xiloader::console::output_to_channel("friend",
-                                "FriendSys: chat_obj layout initialized (%d bytes)", (int)sizeof(CHAT_TEMPLATE));
                         }
                         s_chat_layout_init = true;
                     }
@@ -7053,16 +4851,9 @@ void friend_system::on_tick()
                     try_start_msgrec_recv(s_msgrec_expected);
             }
 
-            /* Drive WhoIs (per-friend status query) if active, else fire one
-             * smoke-test pump on a slow cadence. Slot 0 is shared with
+            /* WhoIs (per-friend status query). Slot 0 is shared with
              * notif_pickup, msgrec_recv, and CallerC; all four start paths
-             * gate on each other.
-             *
-             * First-pass implementation: hardcoded test accid (1007 = CharB)
-             * so we can observe the wire shape and validate the SM end-to-end.
-             * Once the wire+result globals are confirmed, replace with
-             * round-robin iteration over polcore's friend table at +0xB40D8
-             * (stride 0x2C, occupancy bitmap at DAT_0463CA58). */
+             * gate on each other. */
             if (s_whois_active)
             {
                 pump_whois();
@@ -7171,9 +4962,6 @@ void friend_system::on_tick()
                 s_tick_counter++;
                 if (s_tick_counter >= s_backoff_ticks)
                 {
-                    xiloader::console::output_to_channel("friend",
-                        "FriendSys: backoff expired (%ds), retrying (failures=%d)",
-                        s_backoff_ticks / 60, s_consecutive_failures);
                     s_tick_counter = 0;
                     s_backoff_ticks = 0;
                     s_state = STATE_READY;
@@ -7225,67 +5013,4 @@ void friend_system::shutdown()
     s_callerC_active = false;
 
     s_state = STATE_WAITING;
-    xiloader::console::output_to_channel("friend", "FriendSys: shutdown");
-}
-
-void friend_system::request_befriend(const std::string& charname, const std::string& nickname)
-{
-    if (!s_FriendActive)
-    {
-        xiloader::console::output(xiloader::color::error, "FriendSys: not active, cannot befriend");
-        return;
-    }
-
-    /* Queue a CallerC op -- polcore drives the TCP connection; on_send()
-     * injects target charname/nickname into the 304B BefriendRequest. */
-    {
-        std::lock_guard<std::mutex> lk(s_befriend_mtx);
-        s_befriend_queue.push({charname, nickname.empty() ? charname : nickname});
-    }
-
-    xiloader::console::output_to_channel("friend",
-        "FriendSys: queued befriend request for '%s'", charname.c_str());
-}
-
-void friend_system::request_accept(uint32_t from_accid, const std::string& nickname)
-{
-    if (!s_FriendActive) return;
-    xiloader::console::output(xiloader::color::warning,
-        "FriendSys: TODO request_accept(accid=%u, nick='%s') -- needs BefriendResponse packet builder",
-        from_accid, nickname.c_str());
-}
-
-void friend_system::request_decline(uint32_t from_accid)
-{
-    if (!s_FriendActive) return;
-    xiloader::console::output(xiloader::color::warning,
-        "FriendSys: TODO request_decline(accid=%u) -- needs decline packet builder", from_accid);
-}
-
-void friend_system::request_remove(uint32_t target_accid)
-{
-    if (!s_FriendActive) return;
-    xiloader::console::output(xiloader::color::warning,
-        "FriendSys: TODO request_remove(accid=%u) -- needs remove packet builder", target_accid);
-}
-
-void friend_system::send_message(uint32_t to_accid, const std::string& subject, const std::string& body)
-{
-    if (!s_FriendActive) return;
-    xiloader::console::output(xiloader::color::warning,
-        "FriendSys: TODO send_message(accid=%u, subj='%s', body=%zuB) -- needs message send packet builder",
-        to_accid, subject.c_str(), body.size());
-}
-
-void friend_system::force_refresh()
-{
-    if (!s_FriendActive) return;
-
-    /* Reset keepalive timer to trigger CallerB on the next tick. */
-    if (s_state == STATE_STEADY)
-    {
-        s_tick_counter = KEEPALIVE_TICKS;
-        xiloader::console::output_to_channel("friend",
-            "FriendSys: forcing CallerB refresh");
-    }
 }

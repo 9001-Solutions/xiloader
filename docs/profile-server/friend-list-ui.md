@@ -1,13 +1,13 @@
-# Friend List UI — Display Behavior
+# Friend List UI -- Display Behavior
 
 ## Sections
 
 The native /flist UI has four sections:
 
-1. **Online** — friends currently connected
-2. **Offline** — friends not connected
-3. **Pending** — friend requests awaiting confirmation
-4. **Ignore** — blocked accounts
+1. **Online** -- friends currently connected
+2. **Offline** -- friends not connected
+3. **Pending** -- friend requests awaiting confirmation
+4. **Ignore** -- blocked accounts
 
 ## Display Format
 
@@ -15,7 +15,7 @@ The native /flist UI has four sections:
 
 Account nickname only (plain text).
 
-### Online — Logging In
+### Online -- Logging In
 
 Friend has started login but is not yet in-game.
 
@@ -23,7 +23,7 @@ Friend has started login but is not yet in-game.
 - Account nickname
 - XI icon (right)
 
-### Online — In-Game
+### Online -- In-Game
 
 - Online icon (left)
 - Account nickname
@@ -40,12 +40,12 @@ Friend has started login but is not yet in-game.
 ## Data Pipeline
 
 ```
-Server → CallerB → Array 1 (polcore+0x403080)
+Server -> CallerB -> Array 1 (polcore+0x403080)
                         |
                         v  do_array_sync() in friend.cpp
                    Array 2 (polcore+0xB40D8)
                         |
-                        v  func_table+0x29C → polcore+0x23DA0
+                        v  func_table+0x29C -> polcore+0x23DA0
                    Store 3 (FFXiMain friend data object)
                         |
                         v  populate_friend_data

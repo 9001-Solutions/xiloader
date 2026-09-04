@@ -83,7 +83,7 @@ namespace xiloader
                             {
                                 if (!warned)
                                 {
-                                    xiloader::console::output_to_channel("friend",
+                                    xiloader::console::output(xiloader::color::warning,
                                         "ProfileProxy: upstream :%u down, holding client socket and retrying",
                                         upstreamPort);
                                     warned = true;
@@ -95,7 +95,7 @@ namespace xiloader
                             {
                                 if (warned)
                                 {
-                                    xiloader::console::output_to_channel("friend",
+                                    xiloader::console::output(xiloader::color::warning,
                                         "ProfileProxy: upstream :%u reconnected", upstreamPort);
                                     warned = false;
                                 }
@@ -276,7 +276,7 @@ namespace xiloader
             if (outProfilePort) *outProfilePort = pPort;
             if (outPushPort)    *outPushPort    = qPort;
 
-            xiloader::console::output_to_channel("friend",
+            xiloader::console::output(xiloader::color::warning,
                 "ProfileProxy: 127.0.0.1:%u -> %s:%u (profile), 127.0.0.1:%u -> %s:%u (push)",
                 pPort, g_upstreamIp, upstreamProfilePort,
                 qPort, g_upstreamIp, upstreamPushPort);

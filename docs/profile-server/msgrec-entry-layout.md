@@ -1,4 +1,4 @@
-# msgrec entry layout — xiloader/server contract
+# msgrec entry layout -- xiloader/server contract
 
 The 0x48-byte entry that polcore's `msgrec_recv_pump` (+0x276E0) decodes into
 the entry array (one per notification record, stride 0x50 when init's
@@ -6,7 +6,7 @@ the entry array (one per notification record, stride 0x50 when init's
 mask; the remaining bytes are stored as raw plaintext (because we set the
 flag word to 0x0880, which makes polcore skip the conditional block-1 XOR).
 
-This layout is a **xiloader/profile-server convention** — polcore itself
+This layout is a **xiloader/profile-server convention** -- polcore itself
 treats entries[0x10..0x47] as opaque bytes; only entry[0..7] (the token /
 primary key) and entry[0x3E..0x3F] (the flag word) have polcore-defined
 semantics.
@@ -40,13 +40,12 @@ semantics.
 ## Wire framing
 
 Each entry occupies 0x108 bytes on the wire (with leading + trailing zero
-padding around the 0x60-byte custom-base64 chunk). See
-`memory/project_msgrec_recv_pump.md` for the full SM trace.
+padding around the 0x60-byte custom-base64 chunk).
 
 ## Client decode
 
 xiloader's `pump_msgrec_recv` reads `s_msgrec_buf` after polcore completes the
-SM, decodes each 0x50-byte entry into the same shape as
-`s_cached_messages` (currently sourced from LSBN), and the existing native
-msg-object injection takes over. This lets us retire the LSBN HTTP-style
-bypass while keeping the proven UI bridge.
+SM and decodes each 0x50-byte entry into a `NotifMessage`. Body-continuation
+records (`msg_type = 0xFE`) are stitched onto their parent by `msg_id` before
+any message is queued; each remaining record becomes one msg file under
+`msg/<accid>/r/b/`.

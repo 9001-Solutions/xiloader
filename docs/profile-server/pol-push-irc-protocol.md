@@ -1,4 +1,4 @@
-# POL push channel — IRC protocol reference
+# POL push channel -- IRC protocol reference
 
 The PlayOnline profile ("pp") service has **two** transports. The binary
 request/response protocol on 51220/51222 is documented elsewhere. This file
@@ -50,7 +50,7 @@ Verified live: polcore answers a server PING with `PONG <token>`.
     127.0.0.1:51240  ->  127.0.0.1:51340    push (IRC)
 
 xiloader owns the dialled ports so a server restart never drops the socket the
-game holds — see `profile-proxy` section of `current-status.md`. polcore is
+game holds -- see `src/profile_proxy.cpp`. polcore is
 unchanged; it still dials 51222/51240.
 
 Port selection is in push SM case 2/3: `conn+0x209 & 8` -> 0xC829,
@@ -79,7 +79,7 @@ Two gates stand between a fresh client and a working channel.
 `DAT_10099C80` was still 0 on the first tick, and a negative state matches no
 case in the switch, so it can never re-enter. An ordering race, not a failure.
 
-`pol_set_conn_config` (**polcore+0x448A0** — note, not 0x448C8, which is past
+`pol_set_conn_config` (**polcore+0x448A0** -- note, not 0x448C8, which is past
 the prologue; published in polcore's function table at index 814) fixes both
 gates at once: it sets `DAT_10099414 = mode` and RESETS `DAT_10099408`
 (to 0x12 for modes 1/3). State 0x11 otherwise short-circuits to 0x1E whenever
@@ -97,7 +97,7 @@ Full chain once unlatched:
 
 Push SM case 5 calls `FUN_10047E40(fd, 1, &conn[0x39E4])` to populate a key
 struct, then advances **only if `conn+0x39F0` is non-NULL**. In this build
-`FUN_10047E40` is `33 C0 C3` (`xor eax,eax; ret`) — a shared "not implemented"
+`FUN_10047E40` is `33 C0 C3` (`xor eax,eax; ret`) -- a shared "not implemented"
 stub filling 13+ slots of the function table. So the SM parks at sub-state 5
 forever.
 
@@ -115,7 +115,7 @@ Two landmines:
 - **Do NOT populate buffer B** (`conn+0x39F4`) or its mask (`0x39FC`).
   `FUN_10013A80` already allocates and derives them; overwriting leaks that
   allocation and corrupts polcore's derivation.
-- **Do NOT detour `FUN_10047E40`** — it is shared by unrelated callers.
+- **Do NOT detour `FUN_10047E40`** -- it is shared by unrelated callers.
 
 The "masks" are XOR-obfuscated pointers, not masks: the serializer reads from
 `(mask ^ buf)`. Mask 0 makes it read the buffer itself.
@@ -124,7 +124,7 @@ The "masks" are XOR-obfuscated pointers, not masks: the serializer reads from
 
 `FUN_10013A80` (any connection creation) calls `FUN_10019BB0()`, which sets
 `DAT_100AA8C8 = 0`. The friend path tests it at polcore+0x1EBF6 and returns
-**-0x203**, surfacing as the **-5136** abort — so bringing the push channel up
+**-0x203**, surfacing as the **-5136** abort -- so bringing the push channel up
 silently kills friend_status for the rest of the session.
 
 xiloader snapshots the flag before bring-up and restores it after
@@ -144,7 +144,7 @@ Numerics `pol_irc_recv_dispatch` (polcore+0x15E80) acts on:
 
 | numeric | effect |
 |---------|--------|
-| 300 (while sub-state 8) | derive session key from 3rd token (46 chars), init cipher, `conn+0x209 \|= 0x44` — unlocks op 0x28 AND switches sends to the ENCRYPTED path |
+| 300 (while sub-state 8) | derive session key from 3rd token (46 chars), init cipher, `conn+0x209 \|= 0x44` -- unlocks op 0x28 AND switches sends to the ENCRYPTED path |
 | 422 | sub-state -> 0x0C |
 | 433 | error, sub-state 0x0B |
 | 001 | accepted (copies 0xC0 bytes if that length) |
@@ -152,7 +152,7 @@ Numerics `pol_irc_recv_dispatch` (polcore+0x15E80) acts on:
 
 Sending **422** alone completes registration in plaintext, because only 300
 sets the encryption bit. Sub-state **0x0C is the steady listening state**, not
-a stall — advancing to 0x0D runs teardown.
+a stall -- advancing to 0x0D runs teardown.
 
 ---
 
@@ -162,7 +162,7 @@ a stall — advancing to 0x0D runs teardown.
 
 Two things are easy to get wrong:
 
-**Target must be a well-formed polcore nick** — `'U'` followed by 8 base-36
+**Target must be a well-formed polcore nick** -- `'U'` followed by 8 base-36
 digits (`FUN_1001A390` writes the `0x55` 'U' at `buf[-1]`). polcore decodes the
 target and the NOTICE handler **skips the message entirely if it decodes to
 zero**, so a plain target like `x` is silently ignored. It need NOT be the
@@ -192,7 +192,7 @@ Alphabet from polcore's char->value table at **0x10065D64**:
     TSG8IncW3HFKokOg79qzeCmZs2yBYEQVAUxR5rbwi4P@jMDLtpvad0f_J1hlN6uX
 
 Implemented in `tools/profile-server/pol_b64.py`, verified byte-identical
-against polcore's own decoder via `/fdiag polb64`.
+against polcore's own decoder in a live process.
 
 ---
 
@@ -217,10 +217,10 @@ Identity, checked against the friend polcore has at that index:
 
 `FUN_1001A080` is a plain XOR against those keys **and the filename IV**, while
 the client stores `identity = accid ^ IV` (`FUN_10019D40` is also just XOR with
-the IV). **The IV cancels** — encode with the raw accid and the server never
+the IV). **The IV cancels** -- encode with the raw accid and the server never
 needs to know it.
 
-### Branch A — status only
+### Branch A -- status only
 
 Taken when `record[0x1B] != 0`. Calls
 `FUN_100250B0(&record[0x10], index, ts_hi, ts_lo)` -> `FUN_1001ECB0`:
@@ -230,10 +230,10 @@ Taken when `record[0x1B] != 0`. Calls
     +0x12 u8   bit0 -> entry+0x08 bit 16; bits1-3 -> bits 17-19; 7 matches CallerB
     +0x14 u16  game type -> entry+0x0C bits 1-10; 1 = FFXI (drives the XI icon)
 
-Writes ONLY bit-fields. **No name, no zone, no sub-entry** — a friend pushed
+Writes ONLY bit-fields. **No name, no zone, no sub-entry** -- a friend pushed
 this way renders online but blank.
 
-### Branch B — the whole row (use this)
+### Branch B -- the whole row (use this)
 
 Taken when `record[0x1B] == 0` **and** `record[0x1A] == 0` **and**
 `record[0x19] & 1` **and** `0 < record[0x38] < 0x158`.
@@ -245,8 +245,8 @@ fixed-size field, in this order, starting at offset 8:
 
 | bit | size | field | destination |
 |-----|------|-------|-------------|
-| 0x01 | — | apply base record's status bytes | via `FUN_1001EE40` |
-| 0x02 | 16B | status record | **routes to `FUN_10029650` instead — keep CLEAR** |
+| 0x01 | -- | apply base record's status bytes | via `FUN_1001EE40` |
+| 0x02 | 16B | status record | **routes to `FUN_10029650` instead -- keep CLEAR** |
 | 0x04 | 8B | type word | status table +0x00 |
 | 0x08 | 16B | sub-entry | entry+0x18 + (idx&7)*0x10, **bit 0 set** |
 | 0x10 | 16B | name (15B) | Array2 entry+0xA0 |
@@ -265,12 +265,12 @@ Built by `build_status_notice_rich()` in `pol_b64.py`.
 
 Without it, `populate_friend_data` categorises the friend online but skips the
 character name, zone and XI icon. Those normally come from the CallerB snapshot
-taken at *your* login, which never refreshes — so a friend who logs in later
+taken at *your* login, which never refreshes -- so a friend who logs in later
 renders blank. Branch B refreshes all of it.
 
 Note the sub-entry cannot reliably be delivered via the friend_status (2,3)
 record instead: `FUN_1001EEB0` only copies sub-entries when its caller passes
-`is_new`, computed as `(entry[0x10] | entry[0x14]) == 0` — and those two dwords
+`is_new`, computed as `(entry[0x10] | entry[0x14]) == 0` -- and those two dwords
 are the timestamps a status push writes, so after the first push the window is
 closed permanently.
 
@@ -289,7 +289,7 @@ the outer one releases polcore's global lock (`FUN_10047FE0`) and re-takes it
 around the receive, which from the worker thread breaks mutual exclusion with
 the friend state machines.
 
-`FUN_10015B10` is the SEND flush, not receive — easy to misread.
+`FUN_10015B10` is the SEND flush, not receive -- easy to misread.
 
 ---
 
@@ -302,7 +302,7 @@ Real second client logging in, no simulated sessions:
     t+3s   flags = 0x00172006, gate = 0x0001,
            status table = 0x41 + display name, zone = 0x409A
 
-/flist renders **"NickB in DragonAery"** with the XI icon — the account
+/flist renders **"NickB in DragonAery"** with the XI icon -- the account
 nickname + zone + icon format documented in `friend-list-ui.md`.
 
 ## The status-change notification callback (pol+0xAA974)

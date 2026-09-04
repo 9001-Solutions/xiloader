@@ -5,7 +5,7 @@ server traffic. All polcore addresses use image base `0x04580000`.
 
 ## Inputs
 
-The session token (`token`) — 8 bytes, the lobby/auth handshake response. xiloader
+The session token (`token`) -- 8 bytes, the lobby/auth handshake response. xiloader
 captures it during the auth flow and is also visible at runtime in the polcore
 global at `polcore+0x404A88`.
 
@@ -19,18 +19,18 @@ global at `polcore+0x404A88`.
 
 ```
 polcore_set_session_key (polcore+0x1EA60)
-  ─ called when polcore receives the lobby session response
-  ─ args: (token_ptr, hash_ptr)
-  │
-  └── polcore_derive_session_mask (polcore+0x19F20)
-       ─ args: (token_ptr)
-       ─ produces 8-byte mask
-       ─ output stored at polcore+0xAA848  (DAT_0462A848 / 0462A84C)
-       │
-       └── polcore_derive_bf_session_key (polcore+0x1A1E0)
-            ─ args: (mask_lo, mask_hi)
-            ─ MD5(mask, 8 bytes) → first 8 bytes are the BF key
-            ─ output stored at polcore+0xAA8E8 (DAT_0462A8E8 / 0462A8EC)
+  - called when polcore receives the lobby session response
+  - args: (token_ptr, hash_ptr)
+  |
+  +-- polcore_derive_session_mask (polcore+0x19F20)
+       - args: (token_ptr)
+       - produces 8-byte mask
+       - output stored at polcore+0xAA848  (DAT_0462A848 / 0462A84C)
+       |
+       +-- polcore_derive_bf_session_key (polcore+0x1A1E0)
+            - args: (mask_lo, mask_hi)
+            - MD5(mask, 8 bytes) -> first 8 bytes are the BF key
+            - output stored at polcore+0xAA8E8 (DAT_0462A8E8 / 0462A8EC)
 ```
 
 ## Per-connection BF context init
@@ -41,11 +41,11 @@ BF context for each new IXFF connection:
 
 ```
 polcore_init_bf_ctx_with_key(ctx, sbox_mem, key_lo, key_hi, iv_ptr)   polcore+0x63EB0
-  └── polcore_blowfish_init_key (polcore+0x64300)
-        ─ standard Blowfish key schedule:
-        ─ 4 KB S-box init via the 8-byte key
-        ─ P-array XOR with key
-        ─ 521 BF-round mixing pass
+  +-- polcore_blowfish_init_key (polcore+0x64300)
+        - standard Blowfish key schedule:
+        - 4 KB S-box init via the 8-byte key
+        - P-array XOR with key
+        - 521 BF-round mixing pass
 ```
 
 The 5th arg is a pointer to an 8-byte IV taken from the handshake response
@@ -60,9 +60,9 @@ reuses the IV-shadow at `+0x58` (call with last-arg `1`).
 ```python
 def derive_session_mask(token: bytes) -> bytes:
     """
-    polcore+0x19F20 — port of the deterministic mask-mixing function.
+    polcore+0x19F20 -- port of the deterministic mask-mixing function.
     Same algorithm used to derive the filename-XOR IV in
-    docs/profile-server/native-notification-re.md §IV derivation.
+    the filename-IV derivation below.
     """
     local_10 = bytearray(token[0:4])
     local_c  = bytearray(token[4:8])
@@ -95,7 +95,7 @@ def derive_session_mask(token: bytes) -> bytes:
 
 def derive_bf_session_key(mask: bytes) -> bytes:
     """
-    polcore+0x1A1E0 — MD5(mask) truncated to 8 bytes.
+    polcore+0x1A1E0 -- MD5(mask) truncated to 8 bytes.
     """
     import hashlib
     return hashlib.md5(mask).digest()[:8]
@@ -107,7 +107,7 @@ A working Python port lives at `tools/profile-server/ffxi_blowfish.py`
 
 The cipher layer (Blowfish-OFB with newline preservation) and per-context
 data layout are documented separately in
-`docs/profile-server/bf-key-research.md`.
+the BF key research notes (removed; findings are folded into this document).
 
 ## Notable globals
 
@@ -122,20 +122,19 @@ data layout are documented separately in
 
 ## Related code paths
 
-- `polcore+0x63EF0` — `polcore_blowfish_ofb_xform` (OFB stream xform with
+- `polcore+0x63EF0` -- `polcore_blowfish_ofb_xform` (OFB stream xform with
   CR/LF passthrough).
-- `polcore+0x63EB0` — `polcore_init_bf_ctx_with_key` (per-connection ctx
+- `polcore+0x63EB0` -- `polcore_init_bf_ctx_with_key` (per-connection ctx
   init).
-- `polcore+0x64300` — `polcore_blowfish_init_key` (standard BF schedule).
-- `polcore+0x1F5E0` — `polcore_pack_ixff_header` (uses session token in the
+- `polcore+0x64300` -- `polcore_blowfish_init_key` (standard BF schedule).
+- `polcore+0x1F5E0` -- `polcore_pack_ixff_header` (uses session token in the
   16-byte digest at `hdr[0x18..0x27]`).
 
 ## Confirmation
 
 - Befriend wire format work (`docs/profile-server/befriend-ixff-wire-format.md`
-  §5c) verified the chain end-to-end against a real session.
-- Filename XOR IV derivation in `docs/profile-server/native-notification-re.md`
-  §"IV derivation" uses the same mask-mixing function (`polcore+0x99F20` /
+  section 5c) verified the chain end-to-end against a real session.
+  section "IV derivation" uses the same mask-mixing function (`polcore+0x99F20` /
   `polcore+0x19F20`).
 - Production polcore uses only the per-session derived key documented here.
   Any fixed-bytes constant referenced in older scaffolding code is dev-only

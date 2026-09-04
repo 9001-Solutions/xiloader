@@ -7,7 +7,7 @@
 --   3  = KNK
 --   9  = FOK (friend accepted)
 --   10 = FNO (friend declined)
---   anything else → OTR (default fallthrough)
+--   anything else -> OTR (default fallthrough)
 
 CREATE TABLE IF NOT EXISTS account_friend_messages (
     id          INT UNSIGNED NOT NULL AUTO_INCREMENT,

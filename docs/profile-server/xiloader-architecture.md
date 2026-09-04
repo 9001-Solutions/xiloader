@@ -34,23 +34,23 @@ Protocol details: **`pol-push-irc-protocol.md`**.
 
 xiloader orchestrates polcore.dll + FFXiMain.dll initialization:
 
-1. `CoCreateInstance(polcore)` — get `IPolCoreCom` interface
-2. `SetParamInit` + `lpCommandTable` — standard polcore init
-3. `SetProfileServerPort` — configure profile server port
+1. `CoCreateInstance(polcore)` -- get `IPolCoreCom` interface
+2. `SetParamInit` + `lpCommandTable` -- standard polcore init
+3. `SetProfileServerPort` -- configure profile server port
 4. `friend_system::bootstrap(polcore)`:
-   1. `SetAuthMode` — patches 2 instances in polcore, writes g_auth_mode + session hash
-   2. `SetFriendServerConfig` — writes config string to polcore+0xA30DC, clears flags
+   1. `SetAuthMode` -- patches 2 instances in polcore, writes g_auth_mode + session hash
+   2. `SetFriendServerConfig` -- writes config string to polcore+0xA30DC, clears flags
    3. Write sockaddr IP early (127.0.0.1 BE to polcore+0x404ABC)
-   4. `AuthModeMonitor` thread — watches g_auth_mode, re-patches if overwritten
-   5. `CreateFriendList` — initializes descriptor array + callbacks
-   6. Disable BF crypto — `desc[+0x0B]=0` for all 4 slots
-5. `CoCreateInstance(FFXiEntry)` — load FFXiMain.dll
-6. `GameStart` — enter game loop
+   4. `AuthModeMonitor` thread -- watches g_auth_mode, re-patches if overwritten
+   5. `CreateFriendList` -- initializes descriptor array + callbacks
+   6. Disable BF crypto -- `desc[+0x0B]=0` for all 4 slots
+5. `CoCreateInstance(FFXiEntry)` -- load FFXiMain.dll
+6. `GameStart` -- enter game loop
 7. After lobby login, `friend_system::activate()`:
-   1. `SetFriendServerSockaddr` — writes family+port+IP to polcore+0x404AB8
+   1. `SetFriendServerSockaddr` -- writes family+port+IP to polcore+0x404AB8
    2. Set friend system enable gate (polcore+0x99C80 = 1)
-   3. `friend_system::init()` — reset state machine
-   4. `FriendWorkerThread` — drives `on_frame()` at ~60Hz
+   3. `friend_system::init()` -- reset state machine
+   4. `FriendWorkerThread` -- drives `on_frame()` at ~60Hz
 
 ## SetAuthMode Patches
 
@@ -58,8 +58,8 @@ Two patches in polcore force healthy auth mode. Full detail in `auth-crypto-syst
 
 | Instance | RVA | Patch |
 |----------|-----|-------|
-| #1 | polcore+0x01E86D | `JNE` (`0x75`) → `JMP` (`0xEB`) |
-| #2 | polcore+0x022BBD | `JE` (`0x74 0x05`) → `NOP NOP` (`0x90 0x90`) |
+| #1 | polcore+0x01E86D | `JNE` (`0x75`) -> `JMP` (`0xEB`) |
+| #2 | polcore+0x022BBD | `JE` (`0x74 0x05`) -> `NOP NOP` (`0x90 0x90`) |
 
 Instance #2 byte pattern: `74 05 C6 07 01 EB 03 C6 07 02`.
 
@@ -69,7 +69,7 @@ Writes config string to polcore+0xA30DC, clears associated flags. On xiloader th
 
 ## polConnection
 
-- Pattern scan: `8B0D????????8B4148508B` — reads `[ecx+0x48]` (0x1000 buffer ptr)
+- Pattern scan: `8B0D????????8B4148508B` -- reads `[ecx+0x48]` (0x1000 buffer ptr)
 - Object: 0x68 bytes at scanned address
 - Buffer: malloc'd 0x1000 bytes at offset +0x48
 - On xiloader: zeroed (no XOR key material)
@@ -81,7 +81,7 @@ Writes config string to polcore+0xA30DC, clears associated flags. On xiloader th
 - Init packets (40B, marker `0x0001` at `[4:6]`): inject account ID into `[6:12]` if zeros
 - Auth packets (40B, `[12:24]` zeros on Init-seen sockets): inject session token into `[12:24]`
 - Logs auth mode (retail `0x33/0x28/0x2E` vs degraded `0x02`)
-- Does NOT modify Auth[0] — controlled by polcore SetAuthMode patches
+- Does NOT modify Auth[0] -- controlled by polcore SetAuthMode patches
 
 ## Friend Worker State Machine
 
@@ -100,7 +100,7 @@ Writes config string to polcore+0xA30DC, clears associated flags. On xiloader th
 
 | Function | Purpose |
 |----------|---------|
-| `do_array_sync()` | Copy Array 1 (64×104B) → Array 2 (200×176B); map accid, flags, nickname; enforce bit 13 (0x2000) for online entries |
+| `do_array_sync()` | Copy Array 1 (64x104B) -> Array 2 (200x176B); map accid, flags, nickname; enforce bit 13 (0x2000) for online entries |
 | `gate_keeper()` | Patch Store 3 entries (flags, zone, XI icon flags); inject XI icon (type=2) into render buffers for category==5 entries |
 | `do_sync_status()` | Write polcore status table (0x84-stride); enrich Store 3 via polcore enrich (polcore+0x23E60); call `populate_friend_data` |
 | `write_handle_array()` | Populate handle entries with encoded account IDs + charnames for the display text getter chain |

@@ -71,7 +71,6 @@ namespace globals
     bool  g_IsRunning     = false; // Flag to determine if the network threads should hault.
     bool  g_Hide          = false; // Determines whether or not to hide the console window after FFXI starts.
     bool  g_EnableFriends = false; // Enable friend list system (requires profile server). Off by default.
-    bool  g_EnablePolPush = true;  // Live friend status via polcore's POL push channel. Follows --friends; --no-pol-push disables for debugging.
 
     /* Hairpin Fix Variables */
     DWORD g_NewServerAddress;     // Hairpin server address to be overriden with.
@@ -449,10 +448,6 @@ HANDLE WINAPI Mine_CreateFileA(
             std::filesystem::path rp(redirected);
             std::filesystem::create_directories(rp.parent_path());
 
-            xiloader::console::output(xiloader::color::debug,
-                "MsgHook: CreateFileA from %s+0x%X access=0x%08X disp=%u -> '%s'",
-                caller, (unsigned)rva, dwDesiredAccess, dwCreationDisposition,
-                redirected.c_str());
 
             return Real_CreateFileA(redirected.c_str(), dwDesiredAccess, dwShareMode,
                 lpSecurityAttributes, dwCreationDisposition, dwFlagsAndAttributes,
@@ -550,17 +545,6 @@ BOOL WINAPI Mine_MoveFileA(LPCSTR lpExistingFileName, LPCSTR lpNewFileName)
         }
     }
 
-    void* ret_ip = _ReturnAddress();
-    uint32_t ret_rva = 0;
-    HMODULE polcore = GetModuleHandleA("polcore.dll");
-    if (polcore && (uintptr_t)ret_ip >= (uintptr_t)polcore && (uintptr_t)ret_ip < (uintptr_t)polcore + 0x800000)
-        ret_rva = (uint32_t)((uintptr_t)ret_ip - (uintptr_t)polcore);
-    xiloader::console::output(xiloader::color::warning,
-        "MsgHook: MoveFileA from polcore+0x%X '%s' -> '%s'",
-        ret_rva,
-        redirectExist ? existRedirected.c_str() : (lpExistingFileName ? lpExistingFileName : "(null)"),
-        redirectNew ? newRedirected.c_str() : (lpNewFileName ? lpNewFileName : "(null)"));
-
     return Real_MoveFileA(
         redirectExist ? existRedirected.c_str() : lpExistingFileName,
         redirectNew ? newRedirected.c_str() : lpNewFileName);
@@ -573,8 +557,6 @@ BOOL WINAPI Mine_MoveFileA(LPCSTR lpExistingFileName, LPCSTR lpNewFileName)
  * Without redirect the delete targets the original POL path (not on disk)
  * and silently fails, so the next inbox enumeration re-renders the row.
  */
-static void GetCallerLocation(void* retAddr, char* out, size_t outSize);
-
 BOOL WINAPI Mine_DeleteFileA(LPCSTR lpFileName)
 {
     std::string redirected;
@@ -593,8 +575,6 @@ BOOL WINAPI Mine_DeleteFileA(LPCSTR lpFileName)
             redirect = true;
 
             void* ret_ip = _ReturnAddress();
-            char caller[64] = {};
-            GetCallerLocation(ret_ip, caller, sizeof(caller));
 
             /* Retail moves a read message r\b -> r\a; polcore only issues the
              * delete. Without the copy nothing records that the message was
@@ -613,9 +593,6 @@ BOOL WINAPI Mine_DeleteFileA(LPCSTR lpFileName)
                 CopyFileA(redirected.c_str(), dst.c_str(), FALSE);
             }
 
-            xiloader::console::output(xiloader::color::warning,
-                "MsgHook: DeleteFileA from %s '%s' (redirected from '%s')",
-                caller, redirected.c_str(), lpFileName);
         }
     }
     return Real_DeleteFileA(redirect ? redirected.c_str() : lpFileName);
@@ -648,35 +625,6 @@ static bool RedirectMsgPathA(LPCSTR path, std::string& out)
 }
 
 /**
- * @brief Caller IP -> "polcore+0xN" / "FFXi+0xN" / "xiloader+0xN" string.
- * Used so msg-hook log lines identify which DLL invoked the API.
- */
-static void GetCallerLocation(void* retAddr, char* out, size_t outSize)
-{
-    HMODULE pol = GetModuleHandleA("polcore.dll");
-    HMODULE ffxi = GetModuleHandleA("FFXiMain.dll");
-    HMODULE self = GetModuleHandleA(NULL);
-    uintptr_t ip = (uintptr_t)retAddr;
-    if (pol && ip >= (uintptr_t)pol && ip < (uintptr_t)pol + 0x800000) {
-        wsprintfA(out, "polcore+0x%X", (unsigned)(ip - (uintptr_t)pol));
-        out[outSize - 1] = 0;
-        return;
-    }
-    if (ffxi && ip >= (uintptr_t)ffxi && ip < (uintptr_t)ffxi + 0x1000000) {
-        wsprintfA(out, "FFXi+0x%X", (unsigned)(ip - (uintptr_t)ffxi));
-        out[outSize - 1] = 0;
-        return;
-    }
-    if (self && ip >= (uintptr_t)self && ip < (uintptr_t)self + 0x800000) {
-        wsprintfA(out, "xiloader+0x%X", (unsigned)(ip - (uintptr_t)self));
-        out[outSize - 1] = 0;
-        return;
-    }
-    wsprintfA(out, "0x%08X", (unsigned)ip);
-    out[outSize - 1] = 0;
-}
-
-/**
  * @brief MoveFileExA hook -- extension of MoveFileA with replace/delay flags.
  * Polcore imports both MoveFileA and MoveFileExA; redirect msg paths the same.
  */
@@ -690,12 +638,6 @@ BOOL WINAPI Mine_MoveFileExA(LPCSTR lpExistingFileName, LPCSTR lpNewFileName, DW
         std::filesystem::create_directories(rp.parent_path());
     }
     if (redirectExist || redirectNew) {
-        char loc[64]; GetCallerLocation(_ReturnAddress(), loc, sizeof(loc));
-        xiloader::console::output(xiloader::color::warning,
-            "MsgHook: MoveFileExA from %s flags=0x%X '%s' -> '%s'",
-            loc, dwFlags,
-            redirectExist ? existR.c_str() : (lpExistingFileName ? lpExistingFileName : "(null)"),
-            redirectNew   ? newR.c_str()   : (lpNewFileName ? lpNewFileName : "(null)"));
     }
     return Real_MoveFileExA(
         redirectExist ? existR.c_str() : lpExistingFileName,
@@ -712,10 +654,6 @@ BOOL WINAPI Mine_CreateDirectoryA(LPCSTR lpPathName, LPSECURITY_ATTRIBUTES lpSec
     std::string redirected;
     if (RedirectMsgPathA(lpPathName, redirected))
     {
-        char loc[64]; GetCallerLocation(_ReturnAddress(), loc, sizeof(loc));
-        xiloader::console::output(xiloader::color::warning,
-            "MsgHook: CreateDirectoryA from %s '%s' (redirected from '%s')",
-            loc, redirected.c_str(), lpPathName);
         return Real_CreateDirectoryA(redirected.c_str(), lpSecurityAttributes);
     }
     return Real_CreateDirectoryA(lpPathName, lpSecurityAttributes);
@@ -731,10 +669,6 @@ BOOL WINAPI Mine_CreateDirectoryExA(LPCSTR lpTemplateDirectory, LPCSTR lpNewDire
     std::string redirected;
     if (RedirectMsgPathA(lpNewDirectory, redirected))
     {
-        char loc[64]; GetCallerLocation(_ReturnAddress(), loc, sizeof(loc));
-        xiloader::console::output(xiloader::color::warning,
-            "MsgHook: CreateDirectoryExA from %s '%s' (redirected from '%s')",
-            loc, redirected.c_str(), lpNewDirectory);
         return Real_CreateDirectoryExA(lpTemplateDirectory, redirected.c_str(), lpSecurityAttributes);
     }
     return Real_CreateDirectoryExA(lpTemplateDirectory, lpNewDirectory, lpSecurityAttributes);
@@ -748,10 +682,6 @@ BOOL WINAPI Mine_RemoveDirectoryA(LPCSTR lpPathName)
     std::string redirected;
     if (RedirectMsgPathA(lpPathName, redirected))
     {
-        char loc[64]; GetCallerLocation(_ReturnAddress(), loc, sizeof(loc));
-        xiloader::console::output(xiloader::color::warning,
-            "MsgHook: RemoveDirectoryA from %s '%s' (redirected from '%s')",
-            loc, redirected.c_str(), lpPathName);
         return Real_RemoveDirectoryA(redirected.c_str());
     }
     return Real_RemoveDirectoryA(lpPathName);
@@ -780,10 +710,6 @@ BOOL WINAPI Mine_SetFileAttributesA(LPCSTR lpFileName, DWORD dwFileAttributes)
     std::string redirected;
     if (RedirectMsgPathA(lpFileName, redirected))
     {
-        char loc[64]; GetCallerLocation(_ReturnAddress(), loc, sizeof(loc));
-        xiloader::console::output(xiloader::color::warning,
-            "MsgHook: SetFileAttributesA from %s attr=0x%X '%s' (redirected from '%s')",
-            loc, dwFileAttributes, redirected.c_str(), lpFileName);
         return Real_SetFileAttributesA(redirected.c_str(), dwFileAttributes);
     }
     return Real_SetFileAttributesA(lpFileName, dwFileAttributes);
@@ -803,12 +729,6 @@ BOOL WINAPI Mine_CopyFileA(LPCSTR lpExistingFileName, LPCSTR lpNewFileName, BOOL
         std::filesystem::create_directories(rp.parent_path());
     }
     if (redirectExist || redirectNew) {
-        char loc[64]; GetCallerLocation(_ReturnAddress(), loc, sizeof(loc));
-        xiloader::console::output(xiloader::color::warning,
-            "MsgHook: CopyFileA from %s '%s' -> '%s'",
-            loc,
-            redirectExist ? existR.c_str() : (lpExistingFileName ? lpExistingFileName : "(null)"),
-            redirectNew   ? newR.c_str()   : (lpNewFileName ? lpNewFileName : "(null)"));
     }
     return Real_CopyFileA(
         redirectExist ? existR.c_str() : lpExistingFileName,
@@ -842,10 +762,6 @@ HANDLE WINAPI Mine_CreateFileW(LPCWSTR lpFileName, DWORD dwDesiredAccess, DWORD 
                     std::filesystem::path rp(redirected);
                     std::filesystem::create_directories(rp.parent_path());
 
-                    char loc[64]; GetCallerLocation(_ReturnAddress(), loc, sizeof(loc));
-                    xiloader::console::output(xiloader::color::warning,
-                        "MsgHook: CreateFileW from %s access=0x%08X disp=%u -> '%s'",
-                        loc, dwDesiredAccess, dwCreationDisposition, redirected.c_str());
 
                     return Real_CreateFileW(wide, dwDesiredAccess, dwShareMode,
                         lpSecurityAttributes, dwCreationDisposition, dwFlagsAndAttributes,
@@ -1061,10 +977,6 @@ int __cdecl main(int argc, char* argv[])
         .default_value(false)
         .help("(optional) Disable friend list system (default).");
 
-    args.add_argument("--no-pol-push")
-        .implicit_value(true)
-        .default_value(false)
-        .help("(optional) Disable the POL push channel (live friend status). Diagnostic only.");
 
     args.add_argument("--json", "--json-file")
         .help("(optional) The json file to load arguments in from")
@@ -1136,13 +1048,6 @@ int __cdecl main(int argc, char* argv[])
         globals::g_EnableFriends = true;
     if (args.is_used("--no-friends"))
         globals::g_EnableFriends = false;
-    if (args.is_used("--no-pol-push"))
-        globals::g_EnablePolPush = false;
-
-    /* Live friend status is part of the friend list, not a separate feature:
-     * it only runs when the friend system does. --no-pol-push stays as a
-     * diagnostic lever for isolating push-related faults. */
-    globals::g_EnablePolPush = globals::g_EnablePolPush && globals::g_EnableFriends;
 
 
     bool readInJsonArgs = false;
@@ -1207,7 +1112,6 @@ int __cdecl main(int argc, char* argv[])
                 globals::g_Hide              = jsonGet<bool>(jsonData, "hide").value_or(globals::g_Hide);
                 globals::g_TrustThisComputer = jsonGet<bool>(jsonData, "trust_this_computer").value_or(globals::g_TrustThisComputer);
                 globals::g_EnableFriends     = jsonGet<bool>(jsonData, "friends").value_or(globals::g_EnableFriends);
-                globals::g_EnablePolPush     = jsonGet<bool>(jsonData, "pol_push").value_or(globals::g_EnablePolPush);
 
                 std::string language = jsonGet<std::string>(jsonData, "language").value_or({});
 

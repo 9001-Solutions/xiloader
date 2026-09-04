@@ -6,20 +6,20 @@ polcore.dll manages profile server TCP connections via a 3-level state machine a
 
 ```
 Outer Callers (CallerA/B/C)
-  └─► auth_builder (+0x1EA00) — allocates slot, writes mask
-  └─► setup_connection (+0x1FF20) — configures type/param
-  └─► Driver (+0x1E5D0) — per-frame tick (CallerC-specific; not truly generic)
-        ├─► First SM (+0x1F0F0, 10 states) — TCP connect + Init/ACK/Pre-Auth
-        └─► Second SM (+0x1F4D0, 5 states) — Auth build/send/receive
+  +-> auth_builder (+0x1EA00) -- allocates slot, writes mask
+  +-> setup_connection (+0x1FF20) -- configures type/param
+  +-> Driver (+0x1E5D0) -- per-frame tick (CallerC-specific; not truly generic)
+        +-> First SM (+0x1F0F0, 10 states) -- TCP connect + Init/ACK/Pre-Auth
+        +-> Second SM (+0x1F4D0, 5 states) -- Auth build/send/receive
 ```
 
 ## Caller Functions
 
 | Caller | Offset | Mask | Conn Type | Data Size | Behavior |
 |--------|--------|------|-----------|-----------|----------|
-| CallerA | +0x1E580 | 04,05 | type=5, param=0 | 40B | Keepalive. Lock→get_slot→auth_builder→setup→unlock |
-| CallerB | +0x22210 | 04,07 | type=8, param=0x1000 | 64B | Token exchange. get_slot→auth_builder→setup→return. Data contains charname at [1:9] |
-| CallerC | +0x28330 | 04,07 | type=8, param=0 | — | Befriend. Lock→get_slot→auth_builder→setup→unlock |
+| CallerA | +0x1E580 | 04,05 | type=5, param=0 | 40B | Keepalive. Lock->get_slot->auth_builder->setup->unlock |
+| CallerB | +0x22210 | 04,07 | type=8, param=0x1000 | 64B | Token exchange. get_slot->auth_builder->setup->return. Data contains charname at [1:9] |
+| CallerC | +0x28330 | 04,07 | type=8, param=0 | -- | Befriend. Lock->get_slot->auth_builder->setup->unlock |
 
 All call the same `auth_builder` (+0x1EA00) and `setup_connection` (+0x1FF20).
 
@@ -27,7 +27,7 @@ CallerA is called from exactly one site: state machine +0x44FCC (bootstrap, befo
 
 ## Descriptor Array
 
-4 slots × 0x338 (824) bytes at +0x404AD0, ending at +0x4057B0.
+4 slots x 0x338 (824) bytes at +0x404AD0, ending at +0x4057B0.
 
 `get_free_slot` (+0x1EBA0): scans array, checks slot[0] (mode byte): 0=free, non-zero=occupied. Returns slot index or 0xFFFFFF00 (-256) if full.
 
@@ -50,7 +50,7 @@ CallerA is called from exactly one site: state machine +0x44FCC (bootstrap, befo
 | +0x40 | 4 | Main buffer pointer (Init/Auth packets) |
 | +0x44 | 4 | Bytes sent counter 1 |
 | +0x48 | 4 | Bytes sent counter 2 |
-| +0x50 | 48 | BF key material (NOT written by CreateFriendList — initialized during protocol handshake by inner SM) |
+| +0x50 | 48 | BF key material (NOT written by CreateFriendList -- initialized during protocol handshake by inner SM) |
 | +0xDE | 1 | Connection enable flag |
 | +0x328 | 4 | Data pointer |
 
@@ -71,7 +71,7 @@ Returns: 0 = in progress, >0 = complete, <0 = error.
 | 6 | Continue sending, start receiving |
 | 7 | Receive ACK (accumulates until 0x28=40B) |
 | 8 | Send Pre-Auth (0x18=24B from [+0x3C]) |
-| 9 | Receive Pre-Auth Response (0x18=24B, byte[1] must be 0x00, [20:24]→[+0xB8]+[+0x32C]) |
+| 9 | Receive Pre-Auth Response (0x18=24B, byte[1] must be 0x00, [20:24]->[+0xB8]+[+0x32C]) |
 
 ### Init Builder (+0x1F390)
 
@@ -96,7 +96,7 @@ buf[0x18:] = linked list data
 | 1 | Build Auth (CALL +0x1F5E0), optionally BF-encrypt, set state=2, fall through |
 | 2 | Send 40B Auth from [+0x40] via +0x10100, set state=3, return 0 |
 | 3 | Receive Auth Response (accumulates until 0x28=40B), return 1 |
-| 4 | Done — returns 1 |
+| 4 | Done -- returns 1 |
 
 ### State 1: Crypto Decision
 
@@ -118,36 +118,36 @@ Signature: `int __cdecl driver(int slot_index)`
 
 Called from main state machine +0x44FCC for CallerA during bootstrap. For CallerB/C, called by xiloader's worker thread in `friend.cpp`.
 
-This driver hardcodes auth (4, 7, 0x40), making it CallerC-specific. CallerB has its own pump at +0x22260; WhoIs and other variants live at distinct addresses (see `polcore-audit.md` §3 "5 distinct driver functions").
+This driver hardcodes auth (4, 7, 0x40), making it CallerC-specific. CallerB has its own pump at +0x22260; WhoIs and other variants live at distinct addresses (see the polcore reference section 3 "5 distinct driver functions").
 
 ## Top-Level State Machine
 
-Dispatcher at +0x4514E. Byte table at +0x452C4 (31 entries, states 11-41 → index 0-7). Jump table at +0x452A4 (8 entries → handler addresses). State variable at [+0x99408].
+Dispatcher at +0x4514E. Byte table at +0x452C4 (31 entries, states 11-41 -> index 0-7). Jump table at +0x452A4 (8 entries -> handler addresses). State variable at [+0x99408].
 
 Key transitions:
-- configHandler → state 18
-- set_globals_v2 → state 20 (path depends on PlayOnline bootstrap data; xiloader skips this path so the lobby config block is never received and globals stay zero)
+- configHandler -> state 18
+- set_globals_v2 -> state 20 (path depends on PlayOnline bootstrap data; xiloader skips this path so the lobby config block is never received and globals stay zero)
 
 ### Key Call Sites
 
 | Offset | Action |
 |--------|--------|
-| +0x443DD | CreateFriendList(0,0,0) — first-time init |
+| +0x443DD | CreateFriendList(0,0,0) -- first-time init |
 | +0x44BBF | set_globals_v2 with parsed lobby config (NEVER REACHED on xiloader) |
-| +0x44FCC | CallerA — fires during PlayOnline bootstrap (before game, before addons) |
+| +0x44FCC | CallerA -- fires during PlayOnline bootstrap (before game, before addons) |
 
 ## CreateFriendList (+0x1EB00)
 
-Called from state machine at +0x443DD with args (0, 0, 0) — ESI unconditionally zeroed at +0x44392.
+Called from state machine at +0x443DD with args (0, 0, 0) -- ESI unconditionally zeroed at +0x44392.
 
 Actions (loop over 4 slots, EAX starts at desc_base+0x40, increments by 0x338):
 - desc+0x3C = buffer1 (base 0xC558 off polcore .data, +0x208/slot)
 - desc+0x40 = buffer2 (base 0xCD78 off polcore .data, +0x398/slot)
 - desc+0x328 = buffer3 (base 0xDBD8 off polcore .data, +0x800/slot)
-- desc+0x0B = 1 (crypto enabled for ALL 4 slots — not just slot 0)
+- desc+0x0B = 1 (crypto enabled for ALL 4 slots -- not just slot 0)
 - Calls +0x2B9C0 and +0x2BA80 (buffer alloc)
 - Calls +0x1E930 with 3rd param
-- Calls set_globals (+0x1EA60) with params 1 & 2 → null on xiloader → globals stay zero
+- Calls set_globals (+0x1EA60) with params 1 & 2 -> null on xiloader -> globals stay zero
 - Sets init flag [+0xAFBD8]=1 (only runs once)
 
 `desc+0x50` is not written here. BF key material is initialized during the protocol handshake by the inner state machine (LEA [esi+0x50] refs at +0x1F521, +0x1F6FF, +0x1F8A6, +0x1F9DF, +0x1FB05 pass the address to key-init subroutines).
@@ -161,19 +161,19 @@ Must be set in HOST byte order (little-endian). State machine path A copies it t
 The sockaddr is written by the inner state machine during protocol processing:
 ```asm
 +0x1F76F  cmp word [+0x404AB8], 0    ; already set?
-+0x1F776  jne skip                    ; yes → skip
++0x1F776  jne skip                    ; yes -> skip
 +0x1F778  mov word [+0x404AB8], 1     ; family marker
 +0x1F781  mov word [+0x404ABA], 0xC814; port=51220 (HARDCODED)
 +0x1F78A  mov [+0x404ABC], eax        ; IP (from protocol data)
 ```
 
-The IP (EAX) comes from a byte-reversal loop at +0x1F750 that reads 4 bytes at offset +0x08..+0x0B of received data (big-endian → little-endian). On retail, the profile server IP is embedded in data received from SE's servers. Port is always hardcoded 51220.
+The IP (EAX) comes from a byte-reversal loop at +0x1F750 that reads 4 bytes at offset +0x08..+0x0B of received data (big-endian -> little-endian). On retail, the profile server IP is embedded in data received from SE's servers. Port is always hardcoded 51220.
 
 ### Reader (+0x1F12E)
 
 ```asm
 +0x1F12E  cmp word [+0x404AB8], 0    ; sockaddr initialized?
-+0x1F135  je skip                     ; no → skip (falls through to DNS path)
++0x1F135  je skip                     ; no -> skip (falls through to DNS path)
 +0x1F137  push 0x14                   ; memcpy 20 bytes
 +0x1F139  lea eax, [esi+0x24]        ; dest = desc+0x24
 +0x1F13C  push +0x404AB8             ; src = sockaddr global
@@ -194,7 +194,7 @@ Written by xiloader's `SetFriendServerSockaddr()` during `friend_system::activat
 +0x10: 1B  (byte, read separately as mode/flag at +0x99298)
 ```
 
-The state machine at +0x44B7F..+0x44BBF decodes this with a random XOR key (ESI), then passes the result to set_globals_v2 (+0x1EAB0). On xiloader, this data is never received → state never reached → globals stay zero.
+The state machine at +0x44B7F..+0x44BBF decodes this with a random XOR key (ESI), then passes the result to set_globals_v2 (+0x1EAB0). On xiloader, this data is never received -> state never reached -> globals stay zero.
 
 ## Key Addresses
 
@@ -210,7 +210,7 @@ The state machine at +0x44B7F..+0x44BBF decodes this with a random XOR key (ESI)
 | +0x1F390 | Init packet builder |
 | +0x1F4D0 | Second state machine (5 states) |
 | +0x1E580 | CallerA (keepalive) |
-| +0x1E5D0 | Driver function (per-frame tick) — CallerC-specific |
+| +0x1E5D0 | Driver function (per-frame tick) -- CallerC-specific |
 | +0x1F5E0 | Auth packet builder |
 | +0x1EA00 | auth_builder (slot allocator + mask init) |
 | +0x1EA60 | set_globals (session key writer) |
@@ -224,7 +224,7 @@ The state machine at +0x44B7F..+0x44BBF decodes this with a random XOR key (ESI)
 | +0x63EF0 | BF encrypt/decrypt |
 | +0x99408 | State machine current state variable |
 | +0x404AB8 | Sockaddr global (20B) |
-| +0x404AD0 | Descriptor array start (4 slots × 0x338) |
+| +0x404AD0 | Descriptor array start (4 slots x 0x338) |
 | +0x4057B0 | Descriptor array end |
 | +0xAA848 | Session key 1 |
 | +0xAA84C | Session key 2 |

@@ -9,7 +9,7 @@ How FFXi resolves a typed charname to an account_id during `/befriend`,
 Search queries are **client-side**: FFXi opens its own TCP socket directly to
 the search server (port 54002 in our setup), bypassing polcore. xi_search may
 use ZMQ IPC to consult map server for online-player data, but that's its
-internal detail; the FFXi→xi_search hop is plain TCP.
+internal detail; the FFXi->xi_search hop is plain TCP.
 
 **CORRECTED 2026-08-26.** An earlier revision of this document claimed the
 search-server endpoint was zero because the LSB lobby response did not populate
@@ -37,42 +37,42 @@ resolved to the wrong bytes. See the dump-procedure note below.
 
 ```
 /befriend NAME
-  └─> befriend_chat_handler (FFXi+0x79F50)
-       │ Builds a stack-allocated dialog descriptor; copies typed name to it.
-       └─> befriend_descriptor_init (FFXi+0x113D60)            (zero descriptor)
-       └─> befriend_descriptor_clear_search_list_flag (0x1179E0) (clears bit 2)
-       └─> befriend_descriptor_set_typed_name (0x117530)        (name → desc+0xC)
-       └─> befriend_show_confirm_dialog (0xF1A50)
-            │ tick=dialog_tick_simple_confirm (0xF1DA0)
-            │ close=dialog_close_callback   (0xF1F20)
-            ▼
+  +-> befriend_chat_handler (FFXi+0x79F50)
+       | Builds a stack-allocated dialog descriptor; copies typed name to it.
+       +-> befriend_descriptor_init (FFXi+0x113D60)            (zero descriptor)
+       +-> befriend_descriptor_clear_search_list_flag (0x1179E0) (clears bit 2)
+       +-> befriend_descriptor_set_typed_name (0x117530)        (name -> desc+0xC)
+       +-> befriend_show_confirm_dialog (0xF1A50)
+            | tick=dialog_tick_simple_confirm (0xF1DA0)
+            | close=dialog_close_callback   (0xF1F20)
+            v
 [every frame, dialog_system_tick (0x1037C0) drives the dialog]
   dialog_tick_simple_confirm (0xF1DA0)
-    └─> search_query_send_by_criteria (0xE8B20)
-         │ Builds raw IXFF packet on the search-server TCP socket
-         │ (FFXi-owned, not polcore):
-         │   [0x00] uint32 total_size
-         │   [0x04] uint32 'IXFF' magic = 0x46465849
-         │   [0x08] uint16 size
-         │   [0x0A] uint8  flags = 0x80
-         │   [0x0B] uint8  type  = 0  (TCP_SEARCH_ALL)
-         │   [0x0C] uint16 0
-         │   [0x0E] uint16 0
-         │   [0x10] bit-packed criteria via search_pack_criteria_bits
-         │           (5-bit len prefix + 7-bit chars per name byte)
-         └─> Per-context callback at ctx+0x18 enqueues to
+    +-> search_query_send_by_criteria (0xE8B20)
+         | Builds raw IXFF packet on the search-server TCP socket
+         | (FFXi-owned, not polcore):
+         |   [0x00] uint32 total_size
+         |   [0x04] uint32 'IXFF' magic = 0x46465849
+         |   [0x08] uint16 size
+         |   [0x0A] uint8  flags = 0x80
+         |   [0x0B] uint8  type  = 0  (TCP_SEARCH_ALL)
+         |   [0x0C] uint16 0
+         |   [0x0E] uint16 0
+         |   [0x10] bit-packed criteria via search_pack_criteria_bits
+         |           (5-bit len prefix + 7-bit chars per name byte)
+         +-> Per-context callback at ctx+0x18 enqueues to
              search_server_thread (0xE83E0) which does socket/connect/send.
-            ▼
+            v
 xi_search responds with packed rows.
   dialog_close_callback (0xF1F20) parses incoming rows and
   stores them at dialog+0x20.
-            ▼
+            v
 User clicks a row.
   befriend_dialog_callback (0x79FE0) fires with selected row.
-    └─> befriend_submit (0x1FF550) with row
-         │ rec[5] = resolved account_id_hi (real value, not 0!)
-         │ rec[6] = packed (zone, world, lo16)
-         └─> polcore vt+0x33C/vt+0x340 submit chain
+    +-> befriend_submit (0x1FF550) with row
+         | rec[5] = resolved account_id_hi (real value, not 0!)
+         | rec[6] = packed (zone, world, lo16)
+         +-> polcore vt+0x33C/vt+0x340 submit chain
               (already documented in befriend-ixff-wire-format.md)
 ```
 
@@ -95,12 +95,12 @@ when the master friend SM (`friend_master_sm_tick @ FFXi+0xEA610`) reaches
 state 3 with a valid lobby login response in `DAT_04AEE768`.
 
 The lobby response source fields (per character slot, stride `0x8C`):
-- `DAT_04AEE768 + 0x13824 + slot*0x8C` — search IP (big-endian)
-- `DAT_04AEE768 + 0x13828 + slot*0x8C` — search port (htons)
+- `DAT_04AEE768 + 0x13824 + slot*0x8C` -- search IP (big-endian)
+- `DAT_04AEE768 + 0x13828 + slot*0x8C` -- search port (htons)
 
 A globally-cached pair is also expected at:
-- `DAT_04AEE768 + 0x13808` — current search IP
-- `DAT_04AEE768 + 0x1380C` — current search port
+- `DAT_04AEE768 + 0x13808` -- current search IP
+- `DAT_04AEE768 + 0x1380C` -- current search port
 
 ## Why it doesn't work in our build
 
@@ -111,7 +111,7 @@ response payload that FFXi parses. Result chain:
 2. `search_server_login_sm` reads zeros.
 3. `search_server_set_endpoint` writes zeros to `DAT_04ABD8B4/B8`.
 4. `dialog_open_callback` calls `search_server_connect(ctx, 0, 0)`.
-5. `search_server_thread` calls `connect()` to `0.0.0.0:0` → instant fail.
+5. `search_server_thread` calls `connect()` to `0.0.0.0:0` -> instant fail.
 6. State machine resets quietly; `dialog_tick_simple_confirm`'s
    `search_query_send_by_criteria` returns 1 every tick (no progress).
 7. Dialog never displays rows. User accepts the empty stack descriptor.
@@ -124,8 +124,8 @@ Search packets are RAW IXFF (no Blowfish, no polcore). Builders observed:
 
 | Sender                                  | Type | Purpose                                |
 |-----------------------------------------|------|----------------------------------------|
-| `search_query_send_by_criteria` 0xE8B20 | 0    | TCP_SEARCH_ALL — name/job/level filter |
-| `FUN_046E8CA0`                          | 1    | account_id → character lookup          |
+| `search_query_send_by_criteria` 0xE8B20 | 0    | TCP_SEARCH_ALL -- name/job/level filter |
+| `FUN_046E8CA0`                          | 1    | account_id -> character lookup          |
 | `FUN_046E8DA0`                          | 8    | group list                             |
 | `FUN_046E8E70`                          | 2    | RPT short (size 0x24)                  |
 | `FUN_046E8F30`                          | 2    | RPT long (size 0x414)                  |
@@ -143,18 +143,18 @@ The criteria packer (`search_pack_criteria_bits @ FFXi+0x1140A0`) bit-packs:
   0x80000/0x100000/0x1000/0x1000000/0x20000
 
 LSB's `xi_search` (`src/search/search_handler.cpp`) already implements this
-unpacking format — see lines 605..616 for the name extraction.
+unpacking format -- see lines 605..616 for the name extraction.
 
 ## Why not LSB-internal IPC?
 
 In retail FFXi, the search query is opened by the CLIENT directly. xi_search
 may IPC with map (via ZMQ in LSB) to look up online players, but that's
-an xi_search implementation detail. The FFXi→search hop is plain TCP, and
+an xi_search implementation detail. The FFXi->search hop is plain TCP, and
 that's the hop that's broken in our build.
 
 ## The fix (LSB-side, two parts)
 
-### 1. LSB lobby/view server — inject search endpoint into login response
+### 1. LSB lobby/view server -- inject search endpoint into login response
 
 The login response packet (parsed by FFXi's `FUN_046FFC40` reading
 `DAT_04AEE768 + 0x13824` IP / `+0x13828` port per slot) must carry the
@@ -164,7 +164,7 @@ Find the LSB code that builds this response (likely under
 `src/login/`/`src/world/view_session*` or similar). Add the search endpoint
 field to the per-character payload.
 
-### 2. xi_search server — accept FFXi's hello + handle name lookups for offline targets
+### 2. xi_search server -- accept FFXi's hello + handle name lookups for offline targets
 
 xi_search already runs on port 54002 and parses bit-packed names. Verify:
 - Initial 16-byte type-0x10 IXFF "hello" is accepted (handshake before any
@@ -177,9 +177,9 @@ xi_search already runs on port 54002 and parses bit-packed names. Verify:
   expects (row layout to be derived from that decompile if needed).
 
 After both fixes, the entire native chain works:
-- `/befriend NAME` → search query → row with real account_id → dialog selects
-  → `befriend_submit` → polcore IXFF befriend opcode 0x0B class 1 with valid
-  identity → server completes the friendship.
+- `/befriend NAME` -> search query -> row with real account_id -> dialog selects
+  -> `befriend_submit` -> polcore IXFF befriend opcode 0x0B class 1 with valid
+  identity -> server completes the friendship.
 
 ## Renamed / annotated functions in Ghidra
 

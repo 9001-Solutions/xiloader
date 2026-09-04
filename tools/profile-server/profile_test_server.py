@@ -171,10 +171,6 @@ KNOWN_AUTH_CLASSES = {
     (0x04, 0x06),  # WhoIs
     (0x04, 0x07),  # CallerB token exchange
 }
-# The POL push channel (51240) handshakes slowly: polcore sends op 2, then
-# waits for a reply before it will send op 0x28. Dropping the socket at 60s
-# idle truncates the capture mid-handshake.
-UNKNOWN_CHANNEL_HOLD_SECONDS = 600
 # The push channel must not be closed on idle: polcore reads the close as a
 # connection error and tears its router down to state 0x20.
 POL_PUSH_HOLD_SECONDS = 3600
@@ -196,7 +192,6 @@ POL_STATUS_POLL_SECONDS = 5
 # have to be the player's own nick -- any value that decodes non-zero is
 # accepted, verified live.
 POL_STATUS_TARGET_NICK = "UGITW5DT0"
-POL_PUSH_INJECT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "push_inject.txt")
 POL_PUSH_EOL_STR = chr(0x0D) + chr(0x0A)
 POL_PUSH_LF = chr(0x0A)
 
@@ -235,17 +230,12 @@ ACK_COUNTER_START = int(time.time())  # Use real Unix timestamp like retail
 # Non-zero token -> polcore enters keepalive mode (04,05 -> 32B Status).
 SESSION_TOKEN = bytes(12)  # zeros -- forces session setup on each boot
 
-# Packet sizes
-INIT_SIZE = 40
 ACK_SIZE = 24
 AUTH_SIZE = 40
 SHORT_AUTH_SIZE = 24
 AUTH_CONFIRM_SIZE = 24
-STATUS_SIZE = 48
 BEFRIEND_REQ_SIZE = 304
-BEFRIEND_EXTRA_176 = 176
 BEFRIEND_EXTRA_168 = 168
-BEFRIEND_RESP_SIZE = 184
 CONFIRMATION_SIZE = 408
 NOTIFICATION_SIZE = 416
 FINALIZE_8B = 8
@@ -369,8 +359,6 @@ SERVER_IP_BE = bytes([int(x) for x in SERVER_IP.split('.')])
 g_ack_counter = ACK_COUNTER_START
 
 # Log directory
-LOG_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "server_logs")
-os.makedirs(LOG_DIR, exist_ok=True)
 
 
 def db_query(sql, args=None):
@@ -568,21 +556,6 @@ def recipient_from_msg_filename(payload, session_token_8b, sender_accid=None):
     return None
 
 
-def ashita_root():
-    """Ashita install dir that holds the msg tree.
-
-    Resolution order: ASHITA_ROOT, then the bootloader location recorded in
-    ASHITA_BOOTLOADER, then the cwd. Must NOT raise -- this runs inside a
-    connection handler, and an exception there kills the client's connection
-    mid-transfer rather than failing the one lookup.
-    """
-    root = os.environ.get('ASHITA_ROOT')
-    if root:
-        return root
-    boot = os.environ.get('ASHITA_BOOTLOADER')
-    if boot:
-        return os.path.dirname(os.path.dirname(boot))
-    return os.getcwd()
 
 
 def session_salt_for_account(accid):
@@ -772,13 +745,6 @@ def decline_friend_request(from_accid, to_accid):
     log(f"  DB: friend request declined {from_accid} -> {to_accid}")
 
 
-def remove_friend(owner_accid, target_accid):
-    """Remove a friend (unilateral -- only removes owner's side)."""
-    db_execute(
-        "DELETE FROM account_friends WHERE accid_owner = %s AND accid_target = %s",
-        (owner_accid, target_accid)
-    )
-    log(f"  DB: friend removed {owner_accid} -> {target_accid}")
 
 
 def send_friend_message(from_accid, to_accid, subject, body, msg_type=0):
@@ -894,7 +860,6 @@ class FriendConnection:
         self.bf_stream_send = None  # for encrypting S->C
 
         # Packet log for this connection
-        self.packet_log = []
 
     def run(self):
         """Main connection handler loop.
@@ -916,25 +881,9 @@ class FriendConnection:
             if not first:
                 return
 
-            # ACPT direct accept request: 'ACPT' + acceptor_accid (4B) +
-            # target_charname (15B null-padded) + nickname (15B null-padded) = 38B.
-            # Created so xiloader can route the menu Accept around polcore (which
-            # in LSB never actually sends a BefriendResponse for the operation).
-            if len(first) >= 38 and first[0:4] == b'ACPT':
-                acceptor_accid = struct.unpack_from('<I', first, 4)[0]
-                target_charname = first[8:23].rstrip(b'\x00').decode('ascii', errors='replace')
-                nickname = first[23:38].rstrip(b'\x00').decode('ascii', errors='replace')
-                log(f"  ACPT request: accid={acceptor_accid} target='{target_charname}' nick='{nickname}'", self.conn_id)
-                self.handle_acpt_request(acceptor_accid, target_charname, nickname)
-                return
-
             if struct.unpack_from('<H', first, 4)[0] == 0x0001:
                 # Direct connection -- first 40B ARE the Init packet
                 log(f"  Direct connection (no credential header)", self.conn_id)
-                self.packet_log.append({
-                    "direction": "C2S", "label": "Init", "size": 40,
-                    "data": first.hex(), "time": time.time(),
-                })
                 log(f"C->S Init ({len(first)}B):", self.conn_id)
                 print(hex_dump(first), flush=True)
                 self.handle_init(first)
@@ -948,10 +897,6 @@ class FriendConnection:
                 if not rest:
                     return
                 init_data = first[20:] + rest
-                self.packet_log.append({
-                    "direction": "C2S", "label": "Init", "size": 40,
-                    "data": init_data.hex(), "time": time.time(),
-                })
                 log(f"C->S Init ({len(init_data)}B):", self.conn_id)
                 print(hex_dump(init_data), flush=True)
                 self.handle_init(init_data)
@@ -1060,12 +1005,7 @@ class FriendConnection:
                 log(f"  Detected WhoIs (Auth[1:3]={auth_seq:02x},{auth_op:02x}) -- no AuthResponse", self.conn_id)
                 self.handle_whois()
             elif (auth_seq, auth_op) not in KNOWN_AUTH_CLASSES:
-                # Unrecognised class. The POL push channel (which carries live
-                # friend status notifications) is expected to show up here the
-                # first time pol_msg_router is driven far enough to open it.
-                # Do NOT assume CallerA and hang up -- a push channel must stay
-                # open. Capture everything instead.
-                self.handle_unknown_channel(auth_seq, auth_op)
+                log(f"  unknown auth class (Auth[1:3]={auth_seq:02x},{auth_op:02x}) -- closing", self.conn_id)
                 return
             else:
                 # CallerA / standard flow -- AuthResponse required
@@ -1082,45 +1022,8 @@ class FriendConnection:
             log(f"Error: {e}", self.conn_id)
         finally:
             self.conn.close()
-            self.save_log()
             log("Connection closed", self.conn_id)
 
-    def handle_unknown_channel(self, auth_seq, auth_op):
-        """Log and hold open a connection whose auth class we do not implement.
-
-        Used to characterise the POL push channel. Rather than replying with a
-        guess, dump the Init/Auth packets and then read until the peer closes
-        or we time out, logging every chunk. Holding the socket open matters:
-        polcore's push connection is long-lived, and closing it would make the
-        state machine tear down before it reveals anything.
-        """
-        log(f"  *** UNKNOWN auth class (Auth[1:3]={auth_seq:02x},{auth_op:02x}) "
-            f"-- holding open to characterise ***", self.conn_id)
-        if self.account_id:
-            log(f"      Init : {bytes(self.account_id).hex()}", self.conn_id)
-        if self.auth_packet:
-            log(f"      Auth : {bytes(self.auth_packet).hex()}", self.conn_id)
-
-        self.conn.settimeout(5.0)
-        idle = 0
-        total = 0
-        while idle < UNKNOWN_CHANNEL_HOLD_SECONDS:
-            try:
-                chunk = self.conn.recv(4096)
-            except socket.timeout:
-                idle += 5
-                continue
-            except OSError as e:
-                log(f"      socket error: {e}", self.conn_id)
-                break
-            if not chunk:
-                log("      peer closed", self.conn_id)
-                break
-            idle = 0
-            total += len(chunk)
-            log(f"      RECV {len(chunk)}B: {chunk[:64].hex()}"
-                f"{'...' if len(chunk) > 64 else ''}", self.conn_id)
-        log(f"  *** UNKNOWN channel done ({total}B received) ***", self.conn_id)
 
     def _recv_raw(self, size):
         """Receive exactly `size` bytes without logging."""
@@ -1152,13 +1055,6 @@ class FriendConnection:
             log(f"Timeout waiting for {label} ({len(buf)}/{size}B received)", self.conn_id)
             return None
 
-        self.packet_log.append({
-            "direction": "C2S",
-            "label": label,
-            "size": len(buf),
-            "data": buf.hex(),
-            "time": time.time(),
-        })
 
         log(f"C->S {label} ({len(buf)}B):", self.conn_id)
         print(hex_dump(buf), flush=True)
@@ -1172,13 +1068,6 @@ class FriendConnection:
                 log(f"No data received (expected {label})", self.conn_id)
                 return None
 
-            self.packet_log.append({
-                "direction": "C2S",
-                "label": label,
-                "size": len(data),
-                "data": data.hex(),
-                "time": time.time(),
-            })
 
             log(f"C->S {label} ({len(data)}B):", self.conn_id)
             print(hex_dump(data), flush=True)
@@ -1213,13 +1102,6 @@ class FriendConnection:
         if self.bf_crypto_active and label not in ("ACK",):
             wire_data = self.bf_encrypt(data)
 
-        self.packet_log.append({
-            "direction": "S2C",
-            "label": label,
-            "size": len(wire_data),
-            "data": wire_data.hex(),
-            "time": time.time(),
-        })
 
         log(f"S->C {label} ({len(wire_data)}B):", self.conn_id)
         print(hex_dump(wire_data))
@@ -1506,8 +1388,6 @@ class FriendConnection:
                 return
             else:
                 log(f"  Data packet {size}B (unexpected size)", self.conn_id)
-                self.handle_unknown(data)
-                # Keep reading
 
     def handle_short_auth(self, data=None):
         """Handle ShortAuth packet (24B).
@@ -1868,61 +1748,6 @@ class FriendConnection:
         self.send_status(size=16, client_data=data)
 
 
-    def handle_acpt_request(self, acceptor_accid, target_charname, nickname):
-        """Direct accept used by xiloader to bypass the broken polcore CallerC
-        path. Resolves target_charname to its accid, verifies a pending request
-        exists from that accid TO us, calls accept_friend_request to create the
-        bidirectional friendship and clean up state, and marks the matching
-        friend-request message as read so the inbox dismisses it.
-
-        Response: 4 bytes 'ACPT' + 1 byte status (0=ok, non-zero=error code).
-        """
-        status = 0xFF
-        try:
-            target_accid = get_accid_for_charname(target_charname)
-            if not target_accid:
-                log(f"  ACPT: target charname '{target_charname}' has no accid", self.conn_id)
-                status = 1
-            elif not acceptor_accid:
-                log(f"  ACPT: acceptor accid is 0", self.conn_id)
-                status = 2
-            else:
-                rows = db_query(
-                    "SELECT 1 FROM account_friend_requests "
-                    "WHERE accid_from = %s AND accid_to = %s LIMIT 1",
-                    (target_accid, acceptor_accid)
-                )
-                if not rows:
-                    log(f"  ACPT: no pending request from {target_accid} to {acceptor_accid}", self.conn_id)
-                    status = 3
-                else:
-                    nick = nickname or target_charname
-                    # accept_friend_request(from_accid, to_accid, ...) where
-                    # from_accid = original requester (target_accid here, i.e.,
-                    # the row's accid_from) and to_accid = acceptor. Reversed
-                    # args meant the FOK ("X accepted your request") got sent
-                    # to the acceptor (CharA) instead of the requester
-                    # (CharB). Swap them.
-                    accept_friend_request(target_accid, acceptor_accid, nick)
-                    # Mark the friend-request msg in the inbox as read so it
-                    # disappears on the next notification poll. account_friend_messages
-                    # records of msg_type=1 from the target are the request notice.
-                    db_execute(
-                        "UPDATE account_friend_messages SET is_read = 1 "
-                        "WHERE to_accid = %s AND from_accid = %s",
-                        (acceptor_accid, target_accid)
-                    )
-                    log(f"  ACPT: friendship {acceptor_accid} <-> {target_accid} created, "
-                        f"nickname='{nick}', request msgs marked read", self.conn_id)
-                    status = 0
-        except Exception as e:
-            log(f"  ACPT exception: {e}", self.conn_id)
-            status = 0xEE
-        try:
-            self.conn.sendall(b'ACPT' + bytes([status]))
-        except Exception as e:
-            log(f"  ACPT response send error: {e}", self.conn_id)
-        self.close_connection()
 
     def handle_body_fetch(self, data):
         """Handle body-fetch (Auth (3,1), 408B = 0x198).
@@ -1988,37 +1813,9 @@ class FriendConnection:
                 log(f"  MsgUpload: announced {size_param}B for recipient {recipient}",
                     self.conn_id)
 
-        # Default: body-fetch. Extract encoded filename from offset 0x10 and
-        # look up the matching local msg body.
-        try:
-            body_bytes = self._lookup_body_for_request(data[0x10:0x10 + 0x17F])
-        except Exception as exc:
-            # Never let a lookup failure escape: this runs mid-transfer and an
-            # exception here drops the connection instead of the one request.
-            log(f"  Body-fetch lookup failed: {exc}", self.conn_id)
-            body_bytes = None
-
-        if body_bytes is None:
-            log(f"  Body-fetch: could not identify message -- sending zero size",
-                self.conn_id)
-            self.conn.sendall(struct.pack('<I', 0))
-        else:
-            # Encrypt body if BF crypto is active for this connection.
-            if self.bf_crypto_active and self.bf_stream_send is not None:
-                body_to_send = self.bf_stream_send.process(body_bytes, reset_iv=True)
-            else:
-                body_to_send = body_bytes
-
-            # Send 4-byte size header + body bytes.
-            size_header = struct.pack('<I', len(body_to_send))
-            try:
-                self.conn.sendall(size_header)
-                self.conn.sendall(body_to_send)
-                log(f"  Body-fetch: sent {len(body_to_send)}B body (header + content)",
-                    self.conn_id)
-            except Exception as e:
-                log(f"  Body-fetch send error: {e}", self.conn_id)
-
+        # Bodies are delivered inline with the msgrec record and never fetched;
+        # answer the frame with an empty body so the upload path can drain.
+        self.conn.sendall(struct.pack('<I', 0))
         self._drain_tail_then_close()
 
     def _drain_tail_then_close(self):
@@ -2069,104 +1866,8 @@ class FriendConnection:
                                 subject=subject, body=body, msg_type=0)
         self._pending_upload = None
 
-    def _lookup_body_for_request(self, payload):
-        """Identify the message body referenced by a body-fetch request payload
-        and return the body bytes. Returns None if no match found.
 
-        We match by scanning the on-disk msg dir (same one polcore reads) and
-        finding a file whose name appears in the request payload. The on-disk
-        body file IS the body content we want to send back.
-        """
-        # Serve from the DATABASE first. The on-disk file polcore wrote is only
-        # a PLACEHOLDER: subject <0x07> <recipient's own charname>. Returning it
-        # would echo that placeholder back as the message body -- which is
-        # exactly the "body shows my own name" symptom. The real text is ours.
-        body = self._body_from_db(payload)
-        if body is not None:
-            return body
 
-        msg_dir = self._get_local_msg_dir()
-        if not msg_dir or not os.path.isdir(msg_dir):
-            log(f"  msg dir not found: {msg_dir}", self.conn_id)
-            return None
-
-        try:
-            files = os.listdir(msg_dir)
-        except Exception as e:
-            log(f"  could not list msg dir: {e}", self.conn_id)
-            return None
-
-        # Look for any 96-char filename from the dir present anywhere in the payload.
-        # Polcore embeds the filename string in the request; if we find it, that's
-        # the message being fetched.
-        payload_str = payload.decode('latin-1', errors='replace')
-        for fname in files:
-            if len(fname) == 96 and fname in payload_str:
-                path = os.path.join(msg_dir, fname)
-                try:
-                    with open(path, 'rb') as f:
-                        body = f.read()
-                    log(f"  matched filename: {fname[:30]}... ({len(body)}B)",
-                        self.conn_id)
-                    return body
-                except Exception as e:
-                    log(f"  could not read body file: {e}", self.conn_id)
-                    return None
-
-        log(f"  no matching 96-char filename found in payload", self.conn_id)
-        return None
-
-    def _body_from_db(self, payload):
-        """Rebuild a message body from our own records.
-
-        The requested filename decodes to the usual 72-byte record, which
-        carries the SENDER name at +0x10 and a 13-char subject prefix at +0x20.
-        Together with the connection's account (the recipient) that identifies
-        the row, so no filesystem access is needed -- and the server stays
-        correct when it is not co-located with the client.
-        """
-        try:
-            from pol_b64 import decode as b64_decode
-            text = payload.split(bytes(1))[0].decode('ascii', errors='replace')
-            start = text.find('O/m/')
-            fname = text[start + 4:start + 100] if start >= 0 else text[:96]
-            if len(fname) < 96:
-                return None
-            raw = b64_decode(fname[:96])
-            sender_name = raw[0x10:0x20].split(bytes(1))[0].decode('ascii', 'replace')
-            subj_prefix = raw[0x20:0x30].split(bytes(1))[0].decode('ascii', 'replace')
-        except Exception as exc:
-            log(f"  body-from-db: could not decode request ({exc})", self.conn_id)
-            return None
-
-        me = self.cred_account_id
-        if not me and self.account_id:
-            me = struct.unpack_from('<H', self.account_id, 0)[0]
-        if not me or not sender_name:
-            return None
-
-        rows = db_query(
-            "SELECT m.subject, m.body FROM account_friend_messages m "
-            "JOIN chars c ON c.accid = m.from_accid "
-            "WHERE m.to_accid = %s AND c.charname = %s AND m.subject LIKE %s "
-            "ORDER BY m.id DESC LIMIT 1",
-            (me, sender_name, subj_prefix + '%'))
-        if not rows:
-            log(f"  body-from-db: no message to {me} from {sender_name!r} "
-                f"subj {subj_prefix!r}", self.conn_id)
-            return None
-
-        subject = (rows[0]['subject'] or '').encode('ascii', 'replace')
-        body = (rows[0]['body'] or '').encode('ascii', 'replace')
-        out = subject + bytes([7]) + body + bytes(1)
-        log(f"  body-from-db: served {len(out)}B for {sender_name!r} "
-            f"subj {subj_prefix!r}", self.conn_id)
-        return out
-
-    def _get_local_msg_dir(self):
-        """The Ashita-side msg dir (one level above the bootloader exe).
-        Mirrors xiloader's main.cpp EnsureMsgDir."""
-        return os.path.join(ashita_root(), 'msg', 'r', 'b')
 
     def handle_notification(self, data):
         """Handle 416B (3,3) IXFF body -- used by TWO distinct polcore SMs:
@@ -2328,13 +2029,6 @@ class FriendConnection:
             if tail:
                 log(f"  Notif post-header tail recv {len(tail)}B: "
                     f"{tail[:64].hex()}", self.conn_id)
-                self.packet_log.append({
-                    "direction": "C2S",
-                    "label": "NotifTail",
-                    "size": len(tail),
-                    "data": tail.hex(),
-                    "time": time.time(),
-                })
         except Exception:
             pass
         self.close_connection()
@@ -2606,14 +2300,6 @@ class FriendConnection:
             pass
         self.close_connection()
 
-    def handle_unknown(self, data):
-        """Handle unknown packet type."""
-        decoded = self.decode_header(data)
-        log(f"  Unknown ({len(data)}B) decoded: {decoded.hex()}", self.conn_id)
-
-    # ========================================================================
-    # Response Builders
-    # ========================================================================
 
     def send_auth_confirm(self, seq, op, param, token_override=None,
                           force_status_zero=False):
@@ -3194,25 +2880,10 @@ class FriendConnection:
         BEFRIEND_REC_SIZE = 168
         BEFRIEND_TRL_SIZE = 8
 
-        # CONTROLLED EXPERIMENT (task #61): send N=1 record with the
-        # SKIP-PROCESSING flag set (record[+10] = 1). This satisfies polcore's
-        # FUN_045a4170 case 11 read alignment (need real bytes; N=0 hits the
-        # 0-byte recv -> -8 graceful-close path) while telling polcore NOT to
-        # mutate its friend table from this record. The accept SM still
-        # advances to case 13 success (state=13 result=1), all FFXi accept
-        # ops 0-7 complete, and we observe whether a CharB entry still
-        # appears in the friend list:
-        #   - If it appears with the user-typed nickname: polcore inserts the
-        #     friend natively from local state during the accept SM (the
-        #     nickname it embedded in BefriendExtra at offset 40 is also
-        #     stored in polcore-side memory and committed on success).
-        #   - If no entry appears: polcore relies on a server-provided record
-        #     for the insert; we'd need to switch back to N=1 with insert
-        #     flag and find why retail's encoded record produces the nickname
-        #     entry rather than charname.
-        #
-        # Either way, the experiment narrows down where the duplicate came
-        # from in our previous N=1+insert runs.
+        # One record with the skip-processing flag set (record[+10] = 1):
+        # polcore's accept SM needs real bytes to reach its success case, but
+        # inserts the friend from its own local state -- a record that also
+        # mutates the friend table produces a duplicate row.
         header = bytearray(BEFRIEND_HDR_SIZE)
         header[0] = 1
 
@@ -3235,35 +2906,6 @@ class FriendConnection:
     # Logging
     # ========================================================================
 
-    def save_log(self):
-        """Save packet log to file."""
-        if not self.packet_log:
-            return
-
-        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-        acct = self.account_id[:2].hex() if self.account_id else "unknown"
-        fname = f"{ts}_{acct}_{self.addr[1]}.json"
-        fpath = os.path.join(LOG_DIR, fname)
-
-        log_data = {
-            "conn_id": self.conn_id,
-            "cred_account_id": self.cred_account_id,
-            "cred_session_hash": self.cred_session_hash.hex(),
-            "account_id": self.account_id.hex() if self.account_id else None,
-            "token": self.token.hex() if self.token else None,
-            "mask": self.mask.hex() if self.mask else None,
-            "ack_counter": self.ack_counter,
-            "packets": self.packet_log,
-        }
-
-        with open(fpath, 'w') as f:
-            json.dump(log_data, f, indent=2)
-        log(f"Log saved: {fpath}", self.conn_id)
-
-
-# ============================================================================
-# Server
-# ============================================================================
 
 def run_server():
     """Main server loop."""
@@ -3379,7 +3021,6 @@ class PolPushConnection:
             self.conn.settimeout(1.0)
             start = time.time()
             while time.time() - start < POL_PUSH_HOLD_SECONDS:
-                self.drain_inject()
                 self.poll_status()
                 try:
                     chunk = self.conn.recv(4096)
@@ -3412,22 +3053,6 @@ class PolPushConnection:
             except OSError:
                 pass
 
-    def drain_inject(self):
-        """Send any lines dropped into POL_PUSH_INJECT, then truncate it.
-
-        Lets IRC messages be probed against a live registered channel without
-        relaunching the client, which otherwise costs a full login cycle.
-        """
-        try:
-            if not os.path.exists(POL_PUSH_INJECT):
-                return
-            with open(POL_PUSH_INJECT, "r", encoding="latin-1") as fh:
-                lines = [l.rstrip(POL_PUSH_EOL_STR) for l in fh if l.strip()]
-            open(POL_PUSH_INJECT, "w").close()
-        except OSError:
-            return
-        for line in lines:
-            self.send(line)
 
     def send(self, text):
         # polcore terminates its own lines with a bare CR, so match it rather

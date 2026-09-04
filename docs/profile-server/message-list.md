@@ -9,7 +9,7 @@ Messages persist as **files on disk**, not in memory. The filesystem is the pers
 1. NotifPickup (polcore auth 03,03) delivers notification data.
 2. polcore writes message body files to `PlayOnlineViewer\pub\homeNN\msg\r\b\`.
 3. Per-frame function scans `msg\r\b\` directory; file count = notification icon number.
-4. User opens Messages tab → `full_init` creates a task (state machine).
+4. User opens Messages tab -> `full_init` creates a task (state machine).
 5. Task iterates files in `msg\r\b\`, calls `message_insert` per file.
 6. `message_insert` writes sender/recipient/date/type to render/data arrays.
 7. Tab close frees arrays. Reopen re-scans files and rebuilds.
@@ -52,7 +52,7 @@ Body text: ASCII or Shift-JIS. `0x07` separates body from recipient name.
 TSG8IncW3HFKokOg79qzeCmZs2yBYEQVAUxR5rbwi4P@jMDLtpvad0f_J1hlN6uX
 ```
 
-Standard base64 mechanics (3 bytes → 4 chars, big-endian bit packing) with a custom alphabet. `T` = value 0 = padding.
+Standard base64 mechanics (3 bytes -> 4 chars, big-endian bit packing) with a custom alphabet. `T` = value 0 = padding.
 
 ### Decode table (polcore .rdata 0x10065D64)
 
@@ -79,7 +79,7 @@ Dedicated init/driver pair separate from CallerA/B/C.
 | Init wrapper | polcore+0x25B50 | `int __cdecl(data_ptr, byte0, enc_lo, enc_hi, byte1)` |
 | Driver wrapper | polcore+0x25D10 | `int __cdecl(slot, &output)`, returns 1 when done |
 
-- `data_ptr` (arg1) MUST be a valid pointer to ≥383 bytes (driver memcpy's it into the 416B packet)
+- `data_ptr` (arg1) MUST be a valid pointer to >=383 bytes (driver memcpy's it into the 416B packet)
 - Auth (03,03) with buffer size 416 hardcoded in driver
 - Driver auto-frees slot on completion
 - Mode byte at `desc[0x0A]` (not 0x08)
@@ -130,7 +130,7 @@ Dedicated init/driver pair separate from CallerA/B/C.
 
 ## Notification Handlers
 
-Jump table at FFXi+0x1EB642 — four handlers dispatched by the listener at `[FFXi+0x62E9F8]` vtable+0x18.
+Jump table at FFXi+0x1EB642 -- four handlers dispatched by the listener at `[FFXi+0x62E9F8]` vtable+0x18.
 
 | Entry | Address | Action |
 |-------|---------|--------|
@@ -155,8 +155,8 @@ The display controller at `[FFXi+0x62F218]` is a POL text output object (vtable 
 
 Opens the POL chat input field ("msgline" element). Not for displaying body text.
 
-1. Check rebuild flag at `[FFXi+0x62FFA0]` — if set, early return.
-2. Store `arg1→chat_obj+0x1D0`, `arg2→+0x1D4`, `arg3→+0x1D8`.
+1. Check rebuild flag at `[FFXi+0x62FFA0]` -- if set, early return.
+2. Store `arg1->chat_obj+0x1D0`, `arg2->+0x1D4`, `arg3->+0x1D8`.
 3. Set `chat_obj+0x14` (inner_switch) = 1.
 4. Call `show_menu("menu    msgline ", vis=1, 0)` on wm at FFXi+0x5EDD10.
 5. RET 0x0C.
@@ -182,7 +182,7 @@ Calls `full_init` on msg_obj `[FFXi+0x62FF94]`. Creates the file-scanning task.
 |--------|-------|---------|
 | `[FFXi+0x62F218]` | POL text display obj | Body text output |
 
-vtable at FFXi+0x2F6A98. Method at offset 0x24 (vtable[9]): `__thiscall(this, text_string)` — displays text in POL chat area.
+vtable at FFXi+0x2F6A98. Method at offset 0x24 (vtable[9]): `__thiscall(this, text_string)` -- displays text in POL chat area.
 
 ## Window Manager
 

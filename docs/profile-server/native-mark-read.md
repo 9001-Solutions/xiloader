@@ -10,8 +10,8 @@ End-to-end RE of the inbox dismiss path. Marking a message as read deletes `/msg
 2. `inbox_action_dispatcher (FFXi+0xFFFE0)` routes action 4 to `dismiss_outer (FFXi+0xF7430)` with op_code `0x19`.
 3. `dismiss_outer` invokes the polcore-queue SM via `friend_inner_send (FFXi+0xF3150)`.
 4. `polcore_queue_sm_driver (FFXi+0xF4170)` runs through op-table `FFXi+0x361278`:
-   - op[1] = `dismiss_op1_send (FFXi+0xF59D0)` — iterates the polcore queue to locate the matching entry.
-   - op[2] = `dismiss_op2_handler (FFXi+0xF5590)` — opens and reads `/msg/r/b/<file>`.
+   - op[1] = `dismiss_op1_send (FFXi+0xF59D0)` -- iterates the polcore queue to locate the matching entry.
+   - op[2] = `dismiss_op2_handler (FFXi+0xF5590)` -- opens and reads `/msg/r/b/<file>`.
    - op[3] -- static analysis reads this as writing `/msg/r/a/<file>`. It does not happen at runtime: `r/a` stays empty unless xiloader creates the copy.
 5. FFXi deletes `/msg/r/a/<file>` (`FFXi+0xF3E88`), then deletes `/msg/r/b/<file>` (`FFXi+0xF41C8`). Neither call comes from polcore.
 6. `dismiss_completion_callback (FFXi+0x1FFD60)` fires with `result=0`. It clears `DAT_04C3FFA0`, plays a sound, and sets the row read flag at `DAT_04C3FF94+0x64 = 1`.
@@ -21,7 +21,7 @@ End-to-end RE of the inbox dismiss path. Marking a message as read deletes `/msg
 
 `Mine_DeleteFileA` must redirect `\msg\` paths to the local msg directory (matching `Mine_MoveFileA` / `Mine_CreateFileA` / `Mine_FindFirstFileA`).
 
-Without the redirect, polcore deletes against the original POL path that does not exist on disk, the call silently fails, and the file stays in `/b/` — which causes the next inbox enumeration to re-render the row.
+Without the redirect, polcore deletes against the original POL path that does not exist on disk, the call silently fails, and the file stays in `/b/` -- which causes the next inbox enumeration to re-render the row.
 
 ## Key offsets
 
@@ -35,7 +35,7 @@ Without the redirect, polcore deletes against the original POL path that does no
 | `dismiss_op2_handler` | FFXi+0xF5590 | op[2]: file-IO SM (open + read source) |
 | `dismiss_completion_callback` | FFXi+0x1FFD60 | Fires on SM completion |
 | `body_upload_sm` | polcore+0x1A6870 | Body-upload SM (used by other ops, not op-0x19) |
-| `polcore_msg_format_writer` | polcore+0x1C8BE0 | Buffer formatter — `str1\x07str2\0[blob]` payload |
+| `polcore_msg_format_writer` | polcore+0x1C8BE0 | Buffer formatter -- `str1\x07str2\0[blob]` payload |
 | `friend_conn_state` | FFXi+0x4DE900 (`DAT_04AEE900`) | Friend connection state pointer; submits early-return 2 if NULL |
 
 ## Polcore COM vtable slots
@@ -44,9 +44,9 @@ Without the redirect, polcore deletes against the original POL path that does no
 
 | Slot   | Polcore RVA | Function                                              |
 |--------|-------------|-------------------------------------------------------|
-| +0x440 | `+0x1A8E0`  | Buffer packer — builds `str1\x07str2\0[blob]` payload |
-| +0x444 | `+0x1ABA0`  | `polcore_vt444_post_built` — submit, allocates slot + kicks body-upload SM |
-| +0x448 | `+0x1ABC0`  | `polcore_vt448_poll_status` — pumps SM forward        |
+| +0x440 | `+0x1A8E0`  | Buffer packer -- builds `str1\x07str2\0[blob]` payload |
+| +0x444 | `+0x1ABA0`  | `polcore_vt444_post_built` -- submit, allocates slot + kicks body-upload SM |
+| +0x448 | `+0x1ABC0`  | `polcore_vt448_poll_status` -- pumps SM forward        |
 | +0x454 | `+0x1AC00`  | Cancel/cleanup                                        |
 | +0x470 | `+0x1C8BE0` | `polcore_msg_format_writer`                           |
 
@@ -89,7 +89,7 @@ CallerC descriptor table at polcore `+0x404AD0`, stride `0x338`, 4 slots.
 
 | Slot offset   | Field                                          |
 |---------------|------------------------------------------------|
-| `+0x040`      | output_buf_ptr (deref → wire packet)           |
+| `+0x040`      | output_buf_ptr (deref -> wire packet)           |
 | `+0x0C0`      | account ID lo                                  |
 | `+0x0C4`      | account ID hi                                  |
 | `+0x0CC`      | size_param                                     |

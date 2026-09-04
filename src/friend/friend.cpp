@@ -1,9 +1,11 @@
 /* Friend system: bootstrap, send hook, state machine. Worker thread drives
  * on_tick() at ~60Hz. */
 
-#include "defines.h"
-#include "console.h"
-#include "functions.h"
+#include "../defines.h"
+#include "../console.h"
+#include "scan.h"
+#include <cctype>
+#include <cstdio>
 
 #include <algorithm>
 #include <cstring>
@@ -22,9 +24,48 @@
 namespace globals {
     extern xiloader::Language g_Language;
     extern bool               g_IsRunning;
-    extern uint32_t           g_AccountId;
     extern std::string        g_Username;
     extern char               g_SessionHash[16];
+}
+
+namespace friend_system {
+    static bool     s_enabled        = false;
+    static uint32_t s_account_id     = 0;
+    static bool     s_lobby_key_done = false;
+
+    void     enable(bool on)               { s_enabled = on; }
+    bool     enabled()                     { return s_enabled; }
+    void     set_account_id(uint32_t a)    { s_account_id = a; }
+    uint32_t account_id()                  { return s_account_id; }
+    void     on_lobby_key()                { s_lobby_key_done = true; }
+
+    /* polcore builds the profile host name at runtime as "pp%03d.pol.com"
+     * (polcore+0x75430) and the index is computed, so matching only the
+     * literal pp000 lets other indices escape to real DNS. */
+    bool is_profile_host(const char* name)
+    {
+        return s_enabled && name != nullptr &&
+               !_strnicmp(name, "pp", 2) && isdigit((unsigned char)name[2]) &&
+               isdigit((unsigned char)name[3]) && isdigit((unsigned char)name[4]) &&
+               !_stricmp(name + 5, ".pol.com");
+    }
+
+    /* _pcnt N is the player-count argument POL passes at launch. FFXi's
+     * friend init (FUN_046FFFD0) reads it and returns without running when it
+     * is absent, leaving the friend connection state NULL. */
+    const char* launch_args() { return s_enabled ? " _pcnt 1" : ""; }
+
+    void attach_msg_hooks();
+    void detach_msg_hooks();
+    void attach() { if (s_enabled) attach_msg_hooks(); }
+
+    /* Activation must wait for the initial key exchange, i.e. after character
+     * selection, not on the first lobby packet. */
+    void on_ffxi_data_done(int packets)
+    {
+        if (s_enabled && packets >= 3 && s_lobby_key_done)
+            activate();
+    }
 }
 
 static const char* polcore_module()
@@ -414,7 +455,7 @@ static std::string make_message_key(const NotifMessage& nm)
 
 static void InjectFriendAccountId(char* buf)
 {
-    uint16_t low = static_cast<uint16_t>(globals::g_AccountId & 0xFFFF);
+    uint16_t low = static_cast<uint16_t>(friend_system::account_id() & 0xFFFF);
     buf[6]  = static_cast<char>(low & 0xFF);
     buf[7]  = static_cast<char>((low >> 8) & 0xFF);
     buf[8]  = static_cast<char>(0xA2);
@@ -432,7 +473,7 @@ static bool SetAuthMode(const std::string& username)
 {
     const char* module = polcore_module();
 
-    auto patternAddr = (DWORD)xiloader::functions::FindPattern(
+    auto patternAddr = (DWORD)friend_scan::FindPattern(
         module,
         (BYTE*)"\x83\x3D\x00\x00\x00\x00\x02\x75\x39\xC6\x07\x02",
         "xx????xxxxxx");
@@ -471,7 +512,7 @@ static bool SetAuthMode(const std::string& username)
     }
 
     /* Instance #2: JE -> NOP NOP. */
-    auto pat2Addr = (DWORD)xiloader::functions::FindPattern(
+    auto pat2Addr = (DWORD)friend_scan::FindPattern(
         module,
         (BYTE*)"\x74\x05\xC6\x07\x01\xEB\x03\xC6\x07\x02",
         "xxxxxxxxxx");
@@ -649,6 +690,16 @@ static void release_leaked_conn_slots(uint8_t* base)
 
 void friend_system::bootstrap(IPOLCoreCom* polcore)
 {
+    if (!s_enabled)
+        return;
+
+    /* polcore prints its own debug output once the friend list is created;
+     * keep it out of the console window. */
+    {
+        FILE* dummy = nullptr;
+        freopen_s(&dummy, "NUL", "w", stdout);
+    }
+
     SetAuthMode(globals::g_Username);
     /* Stand the profile-server proxy up before pointing polcore anywhere.
      *
@@ -669,7 +720,7 @@ void friend_system::bootstrap(IPOLCoreCom* polcore)
     {
         static char greet[128] = {};
         _snprintf_s(greet, _TRUNCATE, "PASS acct:%u\r\n",
-                    (unsigned)globals::g_AccountId);
+                    (unsigned)friend_system::account_id());
 
         if (xiloader::profile_proxy::start("127.0.0.1",
                                            51222, 51322,
@@ -830,6 +881,8 @@ void friend_system::activate()
 
 void friend_system::on_send(SOCKET s, const char* buf, int len)
 {
+    if (!s_enabled)
+        return;
     if (!s_FriendActive)
         return;
 
@@ -860,7 +913,7 @@ void friend_system::on_send(SOCKET s, const char* buf, int len)
             s_FriendSockets[s] = { true, false };
         }
 
-        if (globals::g_AccountId != 0 &&
+        if (friend_system::account_id() != 0 &&
             buf[6] == 0 && buf[7] == 0 && buf[8] == 0 &&
             buf[9] == 0 && buf[10] == 0 && buf[11] == 0)
         {
@@ -890,7 +943,7 @@ void friend_system::on_send(SOCKET s, const char* buf, int len)
             }
             it->second.auth_rewritten = true;
 
-            if (globals::g_AccountId != 0 &&
+            if (friend_system::account_id() != 0 &&
                 buf[12] == 0 && buf[13] == 0 && buf[14] == 0 && buf[15] == 0 &&
                 buf[16] == 0 && buf[17] == 0 && buf[18] == 0 && buf[19] == 0 &&
                 buf[20] == 0 && buf[21] == 0 && buf[22] == 0 && buf[23] == 0)
@@ -958,8 +1011,8 @@ static FnCharRecordInit Real_CharRecordInit = nullptr;
 static int __cdecl Mine_CharRecordInit(uint32_t a1, uint32_t a2, uint32_t a3, uint32_t a4,
     uint32_t a5, uint32_t a6, uint32_t a7, uint32_t a8, uint32_t a9, uint32_t a10)
 {
-    if (globals::g_AccountId != 0 && (a5 == 0 || a5 == 1))
-        a5 = globals::g_AccountId;
+    if (friend_system::account_id() != 0 && (a5 == 0 || a5 == 1))
+        a5 = friend_system::account_id();
     return Real_CharRecordInit ? Real_CharRecordInit(a1, a2, a3, a4, a5, a6, a7, a8, a9, a10) : 0;
 }
 
@@ -978,7 +1031,7 @@ static bool resolve_polcore_offsets(uint8_t* base)
     /* CallerB pump: PUSH ECX; MOV ECX,[ESP+8]; PUSH EBP; MOV EAX,ECX; PUSH ESI;
      * SHL EAX,4; ADD EAX,ECX; PUSH EDI; PUSH ECX; LEA EAX,[EAX*2+EAX];
      * LEA EDX,[ECX+EAX*2]; LEA ESI,[EDX*8+desc_array] */
-    DWORD pump = xiloader::functions::FindPattern(mod,
+    DWORD pump = friend_scan::FindPattern(mod,
         (const unsigned char*)"\x51\x8B\x4C\x24\x08\x55\x8B\xC1\x56\xC1\xE0\x04\x03\xC1\x57\x51",
         "xxxxxxxxxxxxxxxx");
     if (pump)
@@ -990,7 +1043,7 @@ static bool resolve_polcore_offsets(uint8_t* base)
         resolved++;
 
         /* CallerB init is immediately before pump (PUSH ESI; CALL; MOV ESI,EAX) */
-        DWORD init = xiloader::functions::FindPattern(mod,
+        DWORD init = friend_scan::FindPattern(mod,
             (const unsigned char*)"\x56\xE8\x00\x00\x00\x00\x8B\xF0\x85\xF6\x7D\x02\x5E\xC3",
             "x?????xxxxxxxx");
         if (init && init < pump && (pump - init) < 0x100)
@@ -1002,7 +1055,7 @@ static bool resolve_polcore_offsets(uint8_t* base)
     }
 
     /* Enrich function: PUSH EBX; MOV EBX,[ESP+8]; CMP EBX,0xC8; JB +7; MOV EAX,-0x1C07; POP EBX; RET */
-    DWORD enrich = xiloader::functions::FindPattern(mod,
+    DWORD enrich = friend_scan::FindPattern(mod,
         (const unsigned char*)"\x53\x8B\x5C\x24\x08\x81\xFB\xC8\x00\x00\x00\x72\x07\xB8\xF9\xE3\xFF\xFF\x5B\xC3",
         "xxxxxxxxxxxxxxxxxxxx");
     if (enrich)
@@ -1019,7 +1072,7 @@ static bool resolve_polcore_offsets(uint8_t* base)
      * `6A 40 6A 07 6A 04`. Find that, then scan back to the prologue. */
     {
         const char* auth_sig = "\x6A\x40\x6A\x07\x6A\x04";
-        DWORD auth_call = xiloader::functions::FindPattern(mod, (const unsigned char*)auth_sig, "xxxxxx");
+        DWORD auth_call = friend_scan::FindPattern(mod, (const unsigned char*)auth_sig, "xxxxxx");
         DWORD drv = 0;
         if (auth_call)
         {
@@ -1053,7 +1106,7 @@ static bool resolve_polcore_offsets(uint8_t* base)
      * identical prologues; the disambiguator is the trailing setup_connection
      * conn_type arg (CallerA=5, CallerC=8). Pattern ends in `\x6A\x00\x6A\x08`
      * (PUSH 0; PUSH 8) to match only CallerC. */
-    DWORD callerC = xiloader::functions::FindPattern(mod,
+    DWORD callerC = friend_scan::FindPattern(mod,
         (const unsigned char*)"\x56\xE8\x00\x00\x00\x00\xE8\x00\x00\x00\x00\x8B\xF0\x85\xF6\x7C\x2A"
                               "\xC1\xE0\x04\x03\xC6\x57\x8D\x04\x40\x8D\x0C\x46\x8D\x3C\xCD"
                               "\x00\x00\x00\x00\x57\xC6\x07\x01\xE8\x00\x00\x00\x00\x6A\x00\x6A\x08",
@@ -1073,7 +1126,7 @@ static bool resolve_polcore_offsets(uint8_t* base)
     /* Tick function entry: MOV EAX,[guard]; CMP EAX,EDI; JNE +8; ...
      * The imm32 at offset +1 is OFF_DONE_FLAG (the SM done-flag the tick
      * function reads at entry). Extract it for free. */
-    DWORD tick = xiloader::functions::FindPattern(mod,
+    DWORD tick = friend_scan::FindPattern(mod,
         (const unsigned char*)"\xA1\x00\x00\x00\x00\x3B\xC7\x75\x08\xB8\x01\x00\x00\x00\x5F\x59\xC3\x53\x55\x56\x57",
         "x????xxxxxxxxxxxxxxxx");
     if (tick)
@@ -1164,7 +1217,7 @@ static bool resolve_polcore_offsets(uint8_t* base)
      * match. */
     bool ok_handle = false, ok_handle_idx = false;
     {
-        DWORD h = xiloader::functions::FindPattern(mod,
+        DWORD h = friend_scan::FindPattern(mod,
             (const unsigned char*)"\xB9\x00\x00\x00\x00\xBA\xE0\xFF\xFF\xFF"
                                   "\x83\xC4\x08\x2B\xD1\xBE\x00\x00\x00\x00"
                                   "\xBF\x40\x00\x00\x00",
@@ -1220,7 +1273,7 @@ static bool resolve_polcore_offsets(uint8_t* base)
      * is unique to this dispatch entry. */
     bool ok_engate = false;
     {
-        DWORD eg = xiloader::functions::FindPattern(mod,
+        DWORD eg = friend_scan::FindPattern(mod,
             (const unsigned char*)"\xA1\x00\x00\x00\x00\x85\xC0\x0F\x85\x00\x00\x00\x00"
                                   "\xA1\x00\x00\x00\x00\xC7\x05\x00\x00\x00\x00"
                                   "\x01\x00\x00\x00\x83\xE8\x00",
@@ -1246,7 +1299,7 @@ static bool resolve_polcore_offsets(uint8_t* base)
      * two zero-arg CALLs make this signature unique. */
     bool ok_init_flag = false;
     {
-        DWORD ifl = xiloader::functions::FindPattern(mod,
+        DWORD ifl = friend_scan::FindPattern(mod,
             (const unsigned char*)"\xA1\x00\x00\x00\x00\x85\xC0\x74\x14\xE8\x00\x00\x00\x00"
                                   "\xE8\x00\x00\x00\x00\xC7\x05\x00\x00\x00\x00"
                                   "\x00\x00\x00\x00\xC3",
@@ -1275,7 +1328,7 @@ static bool resolve_polcore_offsets(uint8_t* base)
      * delta. Subtract 0x20A from the MOV ESI imm32 to get NOTIF_STRUCT. */
     bool ok_notif_struct = false;
     {
-        DWORD ns = xiloader::functions::FindPattern(mod,
+        DWORD ns = friend_scan::FindPattern(mod,
             (const unsigned char*)"\xA1\x00\x00\x00\x00\x85\xC0\x75\x00\x53\x56\x33\xDB"
                                   "\xBE\x00\x00\x00\x00"
                                   "\x8D\x86\xF6\xFD\xFF\xFF",
@@ -1301,7 +1354,7 @@ static bool resolve_polcore_offsets(uint8_t* base)
      * to get ARRAY1 itself. */
     bool ok_array1 = false;
     {
-        DWORD a = xiloader::functions::FindPattern(mod,
+        DWORD a = friend_scan::FindPattern(mod,
             (const unsigned char*)"\x83\xEC\x40\xB9\x10\x00\x00\x00\x83\xC8\xFF"
                                   "\x33\xD2\x53\x55\x56\x57\x8D\x7C\x24\x10"
                                   "\xF3\xAB\xB9",
@@ -1329,7 +1382,7 @@ static bool resolve_polcore_offsets(uint8_t* base)
      * MOV EAX,[imm32] immediately before that check and read its imm32. */
     bool ok_dispatch = false;
     {
-        DWORD anchor = xiloader::functions::FindPattern(mod,
+        DWORD anchor = friend_scan::FindPattern(mod,
             (const unsigned char*)"\x83\xC4\x08\x83\xF8\x02\xBE\x01\x00\x00\x00"
                                   "\x7C\x00\x83\xF8\x03\x7F",
             "xxxxxxxxxxxx?xxxx");
@@ -1364,7 +1417,7 @@ static bool resolve_polcore_offsets(uint8_t* base)
      *  into the function body.) */
     bool ok_fs_drv = false;
     {
-        DWORD anchor = xiloader::functions::FindPattern(mod,
+        DWORD anchor = friend_scan::FindPattern(mod,
             (const unsigned char*)"\x6A\x03\x6A\x02\x56\xE8",
             "xxxxxx");
         DWORD drv = 0;
@@ -1424,7 +1477,7 @@ static bool resolve_polcore_offsets(uint8_t* base)
         /* Slot-alloc wrapper prologue: `PUSH EBX; PUSH EBP; XOR EBP, EBP;
          * CALL slot_alloc; MOV EBX, EAX; TEST EBX, EBX; JGE +3; POP EBP;
          * POP EBX; RET; MOV EAX, EBX; PUSH ESI; SHL EAX, 4`. */
-        DWORD init = xiloader::functions::FindPattern(mod,
+        DWORD init = friend_scan::FindPattern(mod,
             (const unsigned char*)"\x53\x55\x33\xED\xE8\x00\x00\x00\x00"
                                   "\x8B\xD8\x85\xDB\x7D\x03\x5D\x5B\xC3"
                                   "\x8B\xC3\x56\xC1\xE0\x04",
@@ -1452,7 +1505,7 @@ static bool resolve_polcore_offsets(uint8_t* base)
      * Old build: body @ +0x1D490, trampoline @ +0x1D7D0. We resolve body. */
     bool ok_whois_drv = false;
     {
-        DWORD anchor = xiloader::functions::FindPattern(mod,
+        DWORD anchor = friend_scan::FindPattern(mod,
             (const unsigned char*)"\x6A\x18\x6A\x06\x6A\x04\x56\xE8",
             "xxxxxxxx");
         DWORD drv = 0;
@@ -1495,7 +1548,7 @@ static bool resolve_polcore_offsets(uint8_t* base)
      * call is the wrapper's distinguishing tail. */
     bool ok_notif_drv = false;
     {
-        DWORD nd = xiloader::functions::FindPattern(mod,
+        DWORD nd = friend_scan::FindPattern(mod,
             (const unsigned char*)"\x56\x57\xE8\x00\x00\x00\x00\x8B\x7C\x24\x0C\x57\xE8"
                                   "\x00\x00\x00\x00\x8B\xF0\x83\xC4\x04\x85\xF6\x7E\x32"
                                   "\x8B\x44\x24\x10\x50\x57\xE8",
@@ -1535,7 +1588,7 @@ static bool resolve_polcore_offsets(uint8_t* base)
          * crash-loop) pattern resolved to a DIFFERENT function with a
          * NEG/SBB stack-shuffle prologue, which on call corrupted polcore
          * state. */
-        DWORD body = xiloader::functions::FindPattern(mod,
+        DWORD body = friend_scan::FindPattern(mod,
             (const unsigned char*)"\x53\x56\x57\xE8\x00\x00\x00\x00"
                                   "\x8B\x4C\x24\x10\x8B\xC1\x51\xC1\xE0\x04\x03\xC1",
             "xxxx????xxxxxxxxxxxx");
@@ -1561,7 +1614,7 @@ static bool resolve_polcore_offsets(uint8_t* base)
      * Old build: body @ +0x1D400, trampoline @ +0x1D480. We resolve body. */
     bool ok_whois_init = false;
     {
-        DWORD init = xiloader::functions::FindPattern(mod,
+        DWORD init = friend_scan::FindPattern(mod,
             (const unsigned char*)"\x53\x57\xE8\x00\x00\x00\x00\xE8\x00\x00\x00\x00"
                                   "\x8B\xF8\x33\xDB\x3B\xFB\x7D",
             "xxx????x????xxxxxxx");
@@ -1598,7 +1651,7 @@ static bool resolve_polcore_offsets(uint8_t* base)
      * first-match-dependent by design. */
     bool ok_np_init = false;
     {
-        DWORD np = xiloader::functions::FindPattern(mod,
+        DWORD np = friend_scan::FindPattern(mod,
             (const unsigned char*)"\x56\xE8\x00\x00\x00\x00\x8B\x44\x24\x18"
                                   "\x8B\x4C\x24\x14\x8B\x54\x24\x10\x50"
                                   "\x8B\x44\x24\x10\x51\x8B\x4C\x24\x10"
@@ -1625,7 +1678,7 @@ static bool resolve_polcore_offsets(uint8_t* base)
      * prologue. */
     bool ok_mr_init = false;
     {
-        DWORD anchor = xiloader::functions::FindPattern(mod,
+        DWORD anchor = friend_scan::FindPattern(mod,
             (const unsigned char*)"\x89\x96\xC0\x00\x00\x00\x89\x86\xC4\x00\x00\x00"
                                   "\x89\x8E\xCC\x00\x00\x00\x89\x86\xD0\x00\x00\x00"
                                   "\xC6\x06\x01",
@@ -1677,7 +1730,7 @@ static bool resolve_polcore_offsets(uint8_t* base)
             0xA1, 0x00, 0x00, 0x00, 0x00, 0x83, 0xC4, 0x04, 0x3B, 0xC8, 0x74, 0x06,
             0x89, 0x0D, 0x00, 0x00, 0x00, 0x00,
         };
-        DWORD pr = xiloader::functions::FindPattern(mod, PR_PAT,
+        DWORD pr = friend_scan::FindPattern(mod, PR_PAT,
             "xxxxxxxxxxxxxx????xx????x????xxxxxxxxx????");
         if (pr)
         {
@@ -1723,7 +1776,7 @@ static bool resolve_ffximain_offsets(uint8_t* base)
      * values that won't appear elsewhere. */
     bool ok_populate = false;
     {
-        DWORD pop = xiloader::functions::FindPattern(mod,
+        DWORD pop = friend_scan::FindPattern(mod,
             (const unsigned char*)"\x83\xEC\x14\x53\x55\x56\x8B\xF1\x33\xDB\x57"
                                   "\x89\x5E\x3C\xC6\x46\x44\x20\xC6\x46\x45\x18",
             "xxxxxxxxxxxxxxxxxxxxxx");
@@ -1757,7 +1810,7 @@ static bool resolve_ffximain_offsets(uint8_t* base)
          * wildcarded -- both vary by client; the structural shape (load
          * global; arg; SHL-by-2 index into record table; SHL-derived
          * size; bulk-zero) is what makes this signature unique. */
-        DWORD ci = xiloader::functions::FindPattern(mod,
+        DWORD ci = friend_scan::FindPattern(mod,
             (const unsigned char*)"\xA1\x00\x00\x00\x00\x8B\x54\x24\x04\x53\x56\x8B\x88"
                                   "\x00\x00\x04\x00\x57\x3B\xD1\x0F\x83\x00\x00\x00\x00"
                                   "\x8B\x34\x90\xB9\x00\x03\x01\x00\x33\xC0\x8B\xFE\x89\x35",
@@ -1784,7 +1837,7 @@ static bool resolve_ffximain_offsets(uint8_t* base)
      * unique to this enumerator's "skip if already done" gate. */
     bool ok_inbox_enum = false;
     {
-        DWORD ie = xiloader::functions::FindPattern(mod,
+        DWORD ie = friend_scan::FindPattern(mod,
             (const unsigned char*)"\xA0\x00\x00\x00\x00\x83\xEC\x08\x84\xC0\x53\x56\x8B\xF1"
                                   "\x0F\x85\x10\x01\x00\x00\x57",
             "x????xxxxxxxxxxxxxxxx");
@@ -1808,7 +1861,7 @@ static bool resolve_ffximain_offsets(uint8_t* base)
      * by computing target_abs = (anchor + 28) + rel32. */
     bool ok_display_cb = false;
     {
-        DWORD dcb = xiloader::functions::FindPattern(mod,
+        DWORD dcb = friend_scan::FindPattern(mod,
             (const unsigned char*)"\x8B\x0D\x00\x00\x00\x00\x85\xC9\x74\x12\x8B\x44\x24\x04"
                                   "\x85\xC0\x75\x0A\x8B\x44\x24\x08\x50\xE8\x00\x00\x00\x00\xC3",
             "xx????xxxxxxxxxxxxxxxxxx????x");
@@ -1834,7 +1887,7 @@ static bool resolve_ffximain_offsets(uint8_t* base)
      * tail (push 0x7A error msg id; ret 8) is the unique fingerprint. */
     bool ok_friend_submit = false;
     {
-        DWORD fs = xiloader::functions::FindPattern(mod,
+        DWORD fs = friend_scan::FindPattern(mod,
             (const unsigned char*)"\xA0\x00\x00\x00\x00\x84\xC0\x74\x10\x8B\x0D\x00\x00\x00\x00"
                                   "\x6A\x7A\xE8\x00\x00\x00\x00\xC2\x08\x00",
             "x????xxxxxx????xxx????xxx");
@@ -1864,7 +1917,7 @@ static bool resolve_ffximain_offsets(uint8_t* base)
      * automatically. */
     bool ok_dismiss_action = false;
     {
-        DWORD da = xiloader::functions::FindPattern(mod,
+        DWORD da = friend_scan::FindPattern(mod,
             (const unsigned char*)"\x66\x83\x7C\x24\x04\x05\x0F\x85\x83\x00\x00\x00"
                                   "\x0F\xBF\x44\x24\x08\x48\x74\x4C\x48\x74\x41\x83\xE8\x02\x75\x64",
             "xxxxxxxxxxxxxxxxxxxxxxxxxxxx");
@@ -1889,7 +1942,7 @@ static bool resolve_ffximain_offsets(uint8_t* base)
      * pointer-validity check is the discriminator. */
     bool ok_flistmai = false;
     {
-        DWORD anchor = xiloader::functions::FindPattern(mod,
+        DWORD anchor = friend_scan::FindPattern(mod,
             (const unsigned char*)"\xA1\x00\x00\x00\x00\x56\x85\xC0\x8B\xF1\x74\x1F"
                                   "\xA1\x00\x00\x00\x00\x85\xC0\x74\x07\x8B\x48\x08\x85\xC9\x75\x0F",
             "x????xxxxxxxx????xxxxxxxxxxx");
@@ -1918,7 +1971,7 @@ static bool resolve_ffximain_offsets(uint8_t* base)
      * auto-opening the inbox panel. */
     bool ok_full_init = false;
     {
-        DWORD fi = xiloader::functions::FindPattern(mod,
+        DWORD fi = friend_scan::FindPattern(mod,
             (const unsigned char*)"\x56\x8B\xF1\xE8\x00\x00\x00\x00\x6A\x01\xE8"
                                   "\x00\x00\x00\x00\x8B\x00\x6A\x01\x8B\x88\x4C\x04"
                                   "\x00\x00\x89\x4E\x74",
@@ -1981,7 +2034,7 @@ static bool resolve_ffximain_offsets(uint8_t* base)
             0xC9, 0x0F, 0xBF, 0x94, 0x48, 0x32, 0x08, 0x00, 0x00, 0xC1, 0xE2, 0x08,
             0x8D, 0x84, 0x02, 0x90, 0x0A, 0x00, 0x00, 0xC3,
         };
-        DWORD s3 = xiloader::functions::FindPattern(mod, S3_PAT,
+        DWORD s3 = friend_scan::FindPattern(mod, S3_PAT,
             "x????xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx");
         if (s3)
         {
@@ -2195,7 +2248,7 @@ static void write_handle_array()
 
     /* handle[0] = (account_id << 1) | 1. Game reads handle[0]+0 as uint64 and
      * right-shifts by 1; bit 0 is the valid flag. */
-    uint64_t encoded_id = ((uint64_t)globals::g_AccountId << 1) | 1ULL;
+    uint64_t encoded_id = ((uint64_t)friend_system::account_id() << 1) | 1ULL;
     *(uint64_t*)hnd_base = encoded_id;
 
     if (!globals::g_Username.empty())
@@ -2836,7 +2889,7 @@ static void build_msg_filename_data(uint8_t* out72, const NotifMessage& nm,
     memset(out72, 0, 72);
     *(uint32_t*)(out72 + 0x00) = nm.from_accid;
     *(uint32_t*)(out72 + 0x04) = nm.msg_id;       /* uniqueness key */
-    *(uint32_t*)(out72 + 0x08) = globals::g_AccountId;
+    *(uint32_t*)(out72 + 0x08) = friend_system::account_id();
     strncpy((char*)(out72 + 0x10), nm.sender, 15);
     strncpy((char*)(out72 + 0x20), nm.subject, 15);
     *(uint32_t*)(out72 + 0x30) = nm.msg_type;
@@ -2883,8 +2936,8 @@ static std::string get_local_msg_dir()
      * already-qualified path through unchanged, so a path built without the
      * account segment gets the segment appended a second time. */
     char acct[32] = {};
-    if (globals::g_AccountId != 0)
-        wsprintfA(acct, "%u", globals::g_AccountId);
+    if (friend_system::account_id() != 0)
+        wsprintfA(acct, "%u", friend_system::account_id());
     else
         strcpy_s(acct, "_no_accid");
     return dir + "\\msg\\" + acct;
@@ -5000,6 +5053,8 @@ void friend_system::on_tick()
 
 void friend_system::shutdown()
 {
+    if (!s_enabled)
+        return;
     if (s_pump_slot >= 0 && s_pump_slot < 4 && s_polBase != nullptr)
     {
         force_free_slot(s_pump_slot);
@@ -5013,4 +5068,5 @@ void friend_system::shutdown()
     s_callerC_active = false;
 
     s_state = STATE_WAITING;
+    detach_msg_hooks();
 }

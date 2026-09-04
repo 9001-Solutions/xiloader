@@ -9,7 +9,7 @@
 #include <mutex>
 #include <cstring>
 
-#include "console.h"
+#include "../console.h"
 
 namespace xiloader
 {

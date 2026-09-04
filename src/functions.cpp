@@ -53,54 +53,16 @@ namespace xiloader
      *
      * @return Start address of where the pattern was found, NULL otherwise.
      */
-    /* Probe via VirtualQuery whether a given page is committed + readable.
-     * Used by the linear pattern scan to skip uncommitted padding inside
-     * the module's reserved VA range -- touching those would raise AV. */
-    static bool isReadableAddress(const void* p)
-    {
-        MEMORY_BASIC_INFORMATION mbi{};
-        if (VirtualQuery(p, &mbi, sizeof(mbi)) == 0)
-            return false;
-        if (mbi.State != MEM_COMMIT)
-            return false;
-        DWORD prot = mbi.Protect & 0xFF;
-        return prot == PAGE_READONLY || prot == PAGE_READWRITE ||
-               prot == PAGE_WRITECOPY || prot == PAGE_EXECUTE_READ ||
-               prot == PAGE_EXECUTE_READWRITE || prot == PAGE_EXECUTE_WRITECOPY;
-    }
-
     DWORD functions::FindPattern(const char* moduleName, const unsigned char* lpPattern, const char* pszMask)
     {
         MODULEINFO mod = { 0 };
         if (!GetModuleInformation(GetCurrentProcess(), GetModuleHandleA(moduleName), &mod, sizeof(MODULEINFO)))
             return 0;
 
-        /* Walk page-by-page so uncommitted pages inside the reserved image
-         * range (some PE images have these as section padding) don't abort
-         * the scan. Within each committed page, fall back to a per-iteration
-         * SEH guard so a page-boundary-straddling read into an uncommitted
-         * neighbor is also survivable. */
-        const DWORD imgBase = (DWORD)mod.lpBaseOfDll;
-        const DWORD imgEnd  = imgBase + mod.SizeOfImage;
-        const DWORD PAGE    = 0x1000;
-
-        for (DWORD pageStart = imgBase; pageStart < imgEnd; pageStart += PAGE)
+        for (DWORD x = 0; x < mod.SizeOfImage; x++)
         {
-            if (!isReadableAddress((const void*)pageStart))
-                continue;
-
-            const DWORD pageEnd = (pageStart + PAGE < imgEnd) ? pageStart + PAGE : imgEnd;
-            for (DWORD x = pageStart; x < pageEnd; x++)
-            {
-                bool matched = false;
-                __try
-                {
-                    matched = functions::MaskCompare(reinterpret_cast<unsigned char*>(x), lpPattern, pszMask);
-                }
-                __except (EXCEPTION_EXECUTE_HANDLER) { matched = false; }
-                if (matched)
-                    return x;
-            }
+            if (functions::MaskCompare(reinterpret_cast<unsigned char*>((DWORD)mod.lpBaseOfDll + x), lpPattern, pszMask))
+                return ((DWORD)mod.lpBaseOfDll + x);
         }
         return 0;
     }

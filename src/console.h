@@ -25,10 +25,8 @@ This file is part of DarkStar-server source code.
 
 #include <windows.h>
 #include <iostream>
-#include <fstream>
 #include <string>
 #include <ctime>
-#include <mutex>
 
 namespace xiloader
 {
@@ -86,30 +84,6 @@ namespace xiloader
          * @param visible   "true" to show the console, "false" to hide it.
          */
         static void visible(bool visible);
-
-        /**
-         * @brief Append a line to the persistent log file. Thread-safe.
-         * Written to xiloader.log in the working directory.
-         * Opened lazily on first write, flushed on every line so the file is
-         * always up-to-date and readable externally even mid-session.
-         */
-        static void log_to_file(std::string const& line)
-        {
-            static std::mutex s_log_mtx;
-            static std::ofstream s_log;
-            std::lock_guard<std::mutex> lk(s_log_mtx);
-            if (!s_log.is_open())
-            {
-                s_log.open("xiloader.log",
-                           std::ios::out | std::ios::app);
-            }
-            if (s_log.is_open())
-            {
-                s_log << line << std::endl;
-                s_log.flush();
-            }
-        }
-
 
     public:
 
@@ -171,11 +145,7 @@ namespace xiloader
             print(c, buffer);
 
             std::cout << std::endl;
-
-            /* Also append to persistent log file for external inspection */
-            log_to_file(timestamp + buffer);
         }
-
 
         static void printMultiLine(std::string msg, const std::string delimiter, const xiloader::color color)
         {

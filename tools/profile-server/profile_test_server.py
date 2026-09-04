@@ -61,7 +61,6 @@ DB_CONFIG = {
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from ffxi_blowfish import FFXIBlowfish
 from pol_b64 import build_status_notice, build_status_notice_rich
-HAS_BLOWFISH = True
 
 # ============================================================================
 # BF-OFB Stream Cipher
@@ -301,62 +300,6 @@ def build_msgrec_record_wire(raw_48: bytes, session_token_8b: bytes) -> bytes:
     return b64_encode_polcore(bytes(out))
 
 
-def build_status_update_record(accid: int, online: bool, zone_id: int,
-                               slot: int, session_token_8b: bytes,
-                               ts_lo: int, ts_hi: int = 0) -> bytes:
-    """Build a 0x48 friend status-update notification record (type 0x1F).
-
-    Delivers a live online/offline transition. polcore routes records whose
-    flag word at +0x3E has (flags & 0xF80) == 0xF80 to its status dispatcher
-    (polcore+0x1B6F0), which applies the embedded status record to the Array2
-    entry via polcore+0x250B0 -> +0x1ECB0. That is the ONLY path that writes
-    the online field; the friend_status (2,3) record path physically cannot
-    (it never touches Array2 entry+0x08 bits 13-15), which is why status was
-    previously frozen at whatever CallerB captured at login.
-
-    Status record (at +0x10), decoded by polcore+0x1ECB0:
-      [0] connection state -> entry+0x08 bits 11-12 (0 = clear both)
-      [1] online: bits13-15 = (value - 1) & 7, and values > 4 are discarded.
-          So 2 => 1 (ONLINE), 1 => 0 (OFFLINE).
-      [2] bit0 -> entry+0x08 bit 16; bits1-3 -> bits 17-19.
-          7 reproduces the 0x70000 that CallerB sets for an online friend.
-      [3] & 0xF -> entry+0x0C bits 11-14
-      [4:6] & 0x3FF -> entry+0x0C bits 1-10 (game type; 1 = FFXI)
-
-    Gating fields required by the dispatcher once DAT_100BCA80 is set (which
-    friend_status does on every completion):
-      +0x00/+0x04 accid pair, pre-hashed as polcore stores it in the entry:
-                  FUN_10019D40 is just XOR with the session-derived globals,
-                  which are the same values derive_iv() reproduces.
-      +0x18       must equal entry+0x9C bits 13-18, which our records leave 0.
-      +0x1B       non-zero, else the status branch is skipped entirely.
-      +0x1C       Array2 slot index (< 200).
-      +0x30/+0x34 status version; must be strictly newer than the stored one
-                  at entry+0x10/+0x14 (written by polcore+0x250B0 itself, so
-                  it starts at 0 and any positive value is accepted).
-      +0x42       bit 0 set, else the dispatcher takes an unrelated branch.
-    """
-    from pol_filename_iv import derive_iv
-    iv_lo, iv_hi = derive_iv(session_token_8b)
-
-    raw = bytearray(0x48)
-    struct.pack_into('<I', raw, 0x00, (iv_lo ^ accid) & 0xFFFFFFFF)
-    struct.pack_into('<I', raw, 0x04, iv_hi & 0xFFFFFFFF)
-    raw[0x10] = 0
-    raw[0x11] = 2 if online else 1
-    raw[0x12] = 7 if online else 0
-    raw[0x13] = 0
-    struct.pack_into('<H', raw, 0x14, 1 if online else 0)
-    raw[0x18] = 0
-    raw[0x1B] = 1
-    raw[0x1C] = slot & 0xFF
-    struct.pack_into('<I', raw, 0x30, ts_lo & 0xFFFFFFFF)
-    struct.pack_into('<I', raw, 0x34, ts_hi & 0xFFFFFFFF)
-    struct.pack_into('<H', raw, 0x3E, 0x0F80)
-    struct.pack_into('<H', raw, 0x42, 1)
-    return bytes(raw)
-
-
 def build_msgrec_response_body(records_48b: list, session_token_8b: bytes,
                                bodies=None) -> bytes:
     """Returns the 0x108-per-record body (after the 8B size header).
@@ -477,7 +420,7 @@ def get_friends_for_account(accid):
         # character means the account is sitting at CHARACTER SELECT -- online
         # at the POL level, but not in the world. An inner join drops that row
         # and the friend renders as offline instead of online-with-no-character.
-        f"SELECT s.accid, c.charname, c.pos_zone, c.nation, "
+        f"SELECT s.accid, c.charname, c.pos_zone, c.nation, c.settings, "
         f"cs.mjob, cs.mlvl, cs.sjob, cs.slvl "
         f"FROM accounts_sessions s "
         f"LEFT JOIN chars c ON c.charid = s.charid "
@@ -491,12 +434,25 @@ def get_friends_for_account(accid):
     for f in friends:
         tid = f['accid_target']
         # Get the primary character name for this account
+        away = False
         if tid in online_map:
             sess = online_map[tid]
-            # None at character select -- no character is bound to the session
-            # yet. Blank name and zone 0 is exactly how that state renders.
-            charname = sess['charname'] or ''
-            online = True
+            # chars.settings is the SAVE_CONF bitfield the client sets via /anon
+            # and /away (packet 0x0DC); bit1 = AwayFlg, bit2 = AnonymityFlg.
+            settings = int(sess.get('settings') or 0)
+            away = bool(settings & 0x02)
+            if settings & 0x04:
+                # Anonymous: the account is online but has asked to be hidden.
+                # Report it exactly as offline -- name and zone must go too, or
+                # the row renders a character for someone who reads as offline.
+                charname = ''
+                online = False
+                away = False
+            else:
+                # None at character select -- no character is bound to the session
+                # yet. Blank name and zone 0 is exactly how that state renders.
+                charname = sess['charname'] or ''
+                online = True
         else:
             # Offline friends expose NO character name -- only the account nickname.
             charname = ''
@@ -510,6 +466,7 @@ def get_friends_for_account(accid):
             'login': f.get('login') or f['nickname'],
             'charname': charname,
             'online': online,
+            'away': away,
             'zone_id': 0,
             'nation': 0,
             'mjob': 0,
@@ -670,17 +627,6 @@ def parse_compose_payload(buf):
     if not subject_s and not body_s:
         return None
     return subject_s[:50], body_s[:300]
-
-
-def accid_from_identity(identity_lo, session_token_8b):
-    """Recover an account id from polcore's hashed identity.
-
-    polcore stores identity as (iv_lo ^ accid, iv_hi) -- FUN_10019D40 is a XOR
-    with the session-derived IV, so it inverts with the same XOR.
-    """
-    from pol_filename_iv import derive_iv
-    iv_lo, _ = derive_iv(session_token_8b)
-    return (iv_lo ^ identity_lo) & 0xFFFFFFFF
 
 
 def request_notification_id(accid_from, accid_to, created_at, session_salt=''):
@@ -862,14 +808,6 @@ def get_unread_messages(accid):
         "WHERE m.to_accid = %s AND m.is_read = 0 "
         "ORDER BY m.created_at DESC",
         (accid,)
-    )
-
-
-def mark_message_read(message_id):
-    """Mark a message as read."""
-    db_execute(
-        "UPDATE account_friend_messages SET is_read = 1 WHERE id = %s",
-        (message_id,)
     )
 
 
@@ -1457,25 +1395,6 @@ class FriendConnection:
         log(f"  AuthResponse (40B): {bytes(resp[:16]).hex()}...", self.conn_id)
         self.send_data("AuthResponse", bytes(resp))
 
-    def send_degraded_auth_response(self):
-        """Send DegradedAuthResp (144B) after Auth in degraded mode.
-
-        Structure (from working server logs 2026-03-02 21:01):
-          [0:4]   = 0x00000028 (40) -- Auth packet size
-          [4:8]   = status_size -- varies by connection type
-          [8:12]  = SERVER_IP_LE -- server IP in little-endian
-          [12:144]= zeros (132 bytes padding)
-        """
-        status_size = self.get_status_size_for_type()
-
-        resp = bytearray(144)
-        struct.pack_into('<I', resp, 0, 0x28)         # Auth size = 40
-        struct.pack_into('<I', resp, 4, status_size)   # Status size (type-dependent)
-        resp[8:12] = SERVER_IP_LE                      # Server IP
-        # [12:144] already zeros
-
-        log(f"  DegradedAuthResp (144B): status_size=0x{status_size:02X} ({status_size}B), {bytes(resp[:16]).hex()}...", self.conn_id)
-        self.send_data("DegradedAuthResp", bytes(resp))
 
     def decode_header(self, data):
         """Decode packet header [0:12] using XOR mask."""
@@ -2010,9 +1929,8 @@ class FriendConnection:
 
         Polcore's body-upload SM (FUN_045A6870, op_type 0x0E) is shared across
         three operations, distinguished by op_code at wire offset +0x190:
-          - 0x00 (or other): body-fetch (click an inbox row to download body)
-          - 0x16: dismiss / mark-as-read (pick Read or Exit on mes2frnd menu)
-          - other op_codes: not yet observed
+          - 0x00: body-fetch / message-send announcement. The only op_code
+            ever observed on the wire (159557 archived connection logs).
 
         For body-fetch we expect:
           1. AuthConfirm (24B)
@@ -2021,22 +1939,18 @@ class FriendConnection:
           4. After full body delivery, polcore enqueues a type-3 notification
              via FUN_0459C570 -> FFXi callback fires -> mes2frnd opens
 
-        For op_code 0x16 (dismiss): same protocol, but body buf is empty and
-        we use the body string fields to identify which message was dismissed
-        and mark it read in the DB.
-
         Request layout (408 bytes after BF-decrypt; we currently disable BF
         so the buffer is plaintext for our LSB session):
           [0x00..0x01]  msg_type bytes (from filename +0x30..+0x31)
           [0x08..0x0F]  64-bit hash from FUN_04599D40(slot+0xC0..+0xC4)
           [0x10..0x18F] 0x17F bytes from slot+0xD8 -- body content:
-                        body-fetch: 96-char encoded filename of msg to download
-                        dismiss:    str1\\x07str2\\0 (acting nick, target ref)
-          [0x190..0x193] op_code (0 for fetch, 0x16 for dismiss)
+                        96-char encoded filename of the message
+          [0x190..0x193] op_code
           [0x194..0x197] size_param
 
-        See docs/profile-server/native-mark-read.md (op 0x16 wire layout)
-        and docs/profile-server/inbox-msg-system.md (body-fetch flow).
+        Marking a message read is purely local (polcore deletes the file from
+        msg/<accid>/r/b); it never reaches the server. See
+        docs/profile-server/native-mark-read.md and inbox-msg-system.md.
         """
         log(f"  Body-upload-SM packet received (408B / Auth(3,1))", self.conn_id)
         log(f"    msg_type bytes: {data[0:2].hex()}", self.conn_id)
@@ -2061,7 +1975,7 @@ class FriendConnection:
         # The body is therefore picked up from the drained tail below, not from
         # this frame -- an earlier attempt to parse it inline never fired.
         self._pending_upload = None
-        if op_code != 0x16 and size_param:
+        if size_param:
             sender_accid = self.cred_account_id
             if not sender_accid and self.account_id:
                 sender_accid = struct.unpack_from('<H', self.account_id, 0)[0]
@@ -2073,13 +1987,6 @@ class FriendConnection:
                 self._pending_upload = (recipient, size_param)
                 log(f"  MsgUpload: announced {size_param}B for recipient {recipient}",
                     self.conn_id)
-
-        # Op 0x16 = dismiss. No body to send back; just mark message read in DB.
-        if op_code == 0x16:
-            self._handle_dismiss(data[0x10:0x10 + 0x17F])
-            self.conn.sendall(struct.pack('<I', 0))
-            self._drain_tail_then_close()
-            return
 
         # Default: body-fetch. Extract encoded filename from offset 0x10 and
         # look up the matching local msg body.
@@ -2116,7 +2023,7 @@ class FriendConnection:
 
     def _drain_tail_then_close(self):
         """Drain anything polcore is still sending (body + CRC for body-upload
-        variants -- accept-success "Friend registration" message, dismiss op 0x16,
+        variants -- accept-success "Friend registration" message,
         etc.). If we close while polcore's case 8/10 of FUN_045a6870 is mid-send,
         send() returns WSAECONNABORTED -> FUN_045905E0 maps to -6 -> op[6]=5 ->
         "Failed to send reply. (5)".
@@ -2161,64 +2068,6 @@ class FriendConnection:
             send_friend_message(from_accid=sender, to_accid=recipient,
                                 subject=subject, body=body, msg_type=0)
         self._pending_upload = None
-
-    def _handle_dismiss(self, body_payload):
-        """Op-code 0x16 -- the user picked Read or Exit on a mes2frnd inbox row.
-        Body payload (0x17F bytes from slot+0xD8) is `str1\\x07str2\\0...`:
-            str1 = acting user's local nickname (from FUN_04920bce(10,...))
-            str2 = sender/target reference for the dismissed message
-                   (from mes2frnd this+0x53 -- empirically the sender nickname,
-                   though exact field semantics still need runtime confirmation)
-
-        Strategy: resolve acting accid (self.cred_account_id), look up the most
-        recent unread message for that accid where the sender's charname OR the
-        message subject matches str2, and mark it read. If no match by str2, fall
-        back to marking the most recent unread (so dismiss always clears
-        something -- better than nothing-cleared on a slightly-off match).
-        """
-        # Parse two 0x07-separated null-terminated strings.
-        sep = body_payload.find(b'\x07')
-        if sep < 0:
-            log(f"  Dismiss: no 0x07 separator in body -- payload={body_payload[:32].hex()}",
-                self.conn_id)
-            return
-        str1 = body_payload[:sep].split(b'\x00', 1)[0].decode('ascii', errors='replace')
-        rest = body_payload[sep + 1:]
-        str2 = rest.split(b'\x00', 1)[0].decode('ascii', errors='replace')
-        log(f"  Dismiss: str1='{str1}' str2='{str2}'", self.conn_id)
-
-        accid = self.cred_account_id
-        if not accid and self.account_id:
-            accid = struct.unpack_from('<H', self.account_id, 0)[0]
-        if not accid:
-            log(f"  Dismiss: no accid on connection -- cannot mark read", self.conn_id)
-            return
-
-        # Pull all unread for this accid. Match by sender charname or subject.
-        unread = get_unread_messages(accid)
-        if not unread:
-            log(f"  Dismiss: no unread messages for accid={accid}", self.conn_id)
-            return
-
-        match = None
-        if str2:
-            for msg in unread:
-                if msg.get('from_charname') == str2 or msg.get('subject') == str2:
-                    match = msg
-                    break
-        if match is None:
-            # Fall back to most-recent unread. unread is ordered by created_at DESC
-            # (see get_unread_messages query), so unread[0] is newest.
-            match = unread[0]
-            log(f"  Dismiss: no str2 match -- falling back to newest unread (id={match['id']})",
-                self.conn_id)
-        else:
-            log(f"  Dismiss: matched id={match['id']} on '{str2}'", self.conn_id)
-
-        mark_message_read(match['id'])
-        log(f"  Dismiss: marked msg id={match['id']} read "
-            f"(from_accid={match['from_accid']} subj={match.get('subject')!r})",
-            self.conn_id)
 
     def _lookup_body_for_request(self, payload):
         """Identify the message body referenced by a body-fetch request payload
@@ -3668,7 +3517,8 @@ class PolPushConnection:
             # kept showing whatever was true when the friend last came online.
             # charname follows the session's charid, so switching characters on
             # one account changes it while the account stays online.
-            state = (online, zone if online else 0, charname, nickname)
+            away     = bool(f.get('away'))
+            state = (online, zone if online else 0, charname, nickname, away)
             if self._status.get(index) == state:
                 continue
             self._status[index] = state
@@ -3692,14 +3542,27 @@ class PolPushConnection:
             # fields, which renders the friend online but with no name, zone
             # or XI icon -- everything else came from the CallerB snapshot
             # taken at OUR login, which never refreshes.
-            payload = build_status_notice_rich(
-                index, online, accid, f.get('nickname') or f.get('charname') or '',
-                f.get('zone_id') or 0,
-                ts=self._stamp,
-                dispname=f.get('charname') or '')
+            if online:
+                payload = build_status_notice_rich(
+                    index, online, accid, f.get('nickname') or f.get('charname') or '',
+                    f.get('zone_id') or 0,
+                    ts=self._stamp,
+                    dispname=f.get('charname') or '',
+                    away=away)
+            else:
+                # Branch A for offline. The rich (branch B) record does NOT
+                # clear the online bits -- Array2 entry+0x08 stays at the
+                # online value -- because branch B routes through FUN_100250F0
+                # (name/zone/sub-entry) rather than FUN_1001ECB0, which is what
+                # actually writes bits 13-15. An offline row needs no name or
+                # zone anyway.
+                payload = build_status_notice(
+                    index, online, accid,
+                    ts_hi=self._stamp, ts_lo=self._stamp)
             self.send(f":{POL_IRC_HOST} NOTICE {POL_STATUS_TARGET_NICK} :{payload}")
+            state = 'OFFLINE' if not online else ('AWAY' if away else 'ONLINE')
             log(f"[{self.tag}] POL PUSH status: friend index {index} "
-                f"(accid {accid}) -> {'ONLINE' if online else 'OFFLINE'}")
+                f"(accid {accid}) -> {state}")
 
     def dispatch(self, text):
         parts = text.split(" ")

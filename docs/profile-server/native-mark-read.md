@@ -1,6 +1,8 @@
 # Native Mark-as-Read Flow
 
-End-to-end RE of the inbox dismiss path. Marking a message as read in the inbox runs through a polcore-side state machine that copies the file from `/msg/r/b/<file>` to `/msg/r/a/<file>` and deletes the source. Op-0x19 dismiss is intentionally local — no wire packet is sent.
+End-to-end RE of the inbox dismiss path. Marking a message as read deletes `/msg/r/b/<file>`; no wire packet is sent. Op-0x19 dismiss is intentionally local.
+
+**Corrected 2026-09-04 from a live trace.** Both deletes are issued by **FFXiMain**, not polcore, and FFXi never writes the `r/a` copy -- see "Observed dismiss trace" below. The step list that follows is the static read of the code path; where it disagrees with the trace, the trace wins.
 
 ## Click flow
 
@@ -10,8 +12,8 @@ End-to-end RE of the inbox dismiss path. Marking a message as read in the inbox 
 4. `polcore_queue_sm_driver (FFXi+0xF4170)` runs through op-table `FFXi+0x361278`:
    - op[1] = `dismiss_op1_send (FFXi+0xF59D0)` — iterates the polcore queue to locate the matching entry.
    - op[2] = `dismiss_op2_handler (FFXi+0xF5590)` — opens and reads `/msg/r/b/<file>`.
-   - op[3] — writes `/msg/r/a/<file>`.
-5. Polcore calls `DeleteFileA` on `/msg/r/b/<file>` after the copy.
+   - op[3] -- static analysis reads this as writing `/msg/r/a/<file>`. It does not happen at runtime: `r/a` stays empty unless xiloader creates the copy.
+5. FFXi deletes `/msg/r/a/<file>` (`FFXi+0xF3E88`), then deletes `/msg/r/b/<file>` (`FFXi+0xF41C8`). Neither call comes from polcore.
 6. `dismiss_completion_callback (FFXi+0x1FFD60)` fires with `result=0`. It clears `DAT_04C3FFA0`, plays a sound, and sets the row read flag at `DAT_04C3FF94+0x64 = 1`.
 7. Next inbox refresh re-enumerates `/msg/r/b/`; the dismissed file is no longer present, so the row is excluded and the inbox rebuilds without it.
 
@@ -50,9 +52,36 @@ Without the redirect, polcore deletes against the original POL path that does no
 
 ## Op codes
 
-Op-0x19 is the dismiss op_code dispatched by `inbox_action_dispatcher` for action 4 (Read). Local — no TCP packet.
+Op-0x19 is the dismiss op_code dispatched by `inbox_action_dispatcher` for action 4 (Read). Local -- no TCP packet.
 
-Op-0x16 is a body-upload (different op_table, different submit chain). It produces wire traffic via `body_upload_sm`. Unrelated to dismiss.
+Confirmed empirically: across 159557 archived connection logs, every 408-byte
+`body_upload_sm` frame carries `op_code = 0`. Op-0x16 has never appeared on the
+wire, and the server therefore has no dismiss handler. Read state is local file
+state only; `account_friend_messages.is_read` is never set by the client.
+
+## Observed dismiss trace
+
+Live capture, 2026-09-04, reading one message in the recipient's inbox:
+
+```
+DeleteFileA from FFXi+0xF3E88     msg\1000\r\a\<file>   FFXi clears any stale r/a copy
+CopyFileA   from xiloader+0x2B911 msg\1000\r\b\<file>   xiloader's b -> a copy
+DeleteFileA from FFXi+0xF41C8     msg\1000\r\b\<file>   the dismiss delete
+```
+
+Three corrections to the static analysis above:
+
+1. Both deletes come from **FFXiMain**, not polcore.
+2. FFXi never writes `r/a`. It only deletes there, so without xiloader's copy the
+   read state is recorded nowhere and the next login rewrites the message into
+   `r/b` as unread.
+3. **Ordering dependency:** FFXi's `r/a` delete precedes its `r/b` delete. The
+   copy must therefore hang off the `r/b` delete, as `Mine_DeleteFileA` does --
+   a copy made any earlier in the sequence gets wiped by step 1.
+
+Read state is local file state only. `account_friend_messages.is_read` is never
+set by the client, so `write_msg_file` suppresses any message already present in
+`r/a` rather than relying on the server.
 
 ## CallerC descriptor offsets (body_upload_sm)
 

@@ -79,12 +79,17 @@ def build_status_notice(friend_index, online, ident_lo, ident_hi=0,
 
     rec[0x10] = rec0 & 0xFF
     rec[0x11] = 0x02 if online else 0x01
-    rec[0x12] = (rec2 & 0xFF) if online else 0x00
+
+    # rec[2] and the game type stay populated even when pushing OFFLINE.
+    # Zeroing them made the whole record a no-op: Array2 entry+0x08 kept its
+    # online value and the friend never went offline. The known-good offline
+    # push leaves bits 16-18 set (entry+0x08 = 0x00070006) and only clears
+    # bit 13, which is rec[1]'s job alone.
+    rec[0x12] = rec2 & 0xFF
 
     # Game type -> entry+0x0C bits 1-10. 1 = FFXI, and this is what drives the
-    # XI icon on the row. Leaving it 0 renders the friend online but with no
-    # game icon.
-    struct.pack_into('<H', rec, 0x14, 1 if online else 0)
+    # XI icon on the row.
+    struct.pack_into('<H', rec, 0x14, 1)
 
     # Must be strictly newer than the stored pair or the update is ignored.
     struct.pack_into("<I", rec, 0x30, ts_hi & 0xFFFFFFFF)
@@ -94,7 +99,7 @@ def build_status_notice(friend_index, online, ident_lo, ident_hi=0,
 
 def build_status_notice_rich(friend_index, online, ident_lo, charname,
                              zone_id, ident_hi=0, ts=0, dispname=None,
-                             rec0=0x00, rec2=0x07, match18=0x00):
+                             rec0=0x00, rec2=0x07, match18=0x00, away=False):
     """Build a NOTICE payload that pushes the WHOLE row, not just online bits.
 
     status_update_dispatch (polcore+0x1B6F0) has two branches:
@@ -181,7 +186,15 @@ def build_status_notice_rich(friend_index, online, ident_lo, charname,
     rec[0x1B] = 0x00          # local_3d must be 0, else branch A wins
     rec[0x1C] = friend_index & 0xFF
     rec[0x10] = rec0 & 0xFF
-    rec[0x11] = 0x02 if online else 0x01
+    # rec[1] is a presence ENUM, not a flag: polcore stores
+    # bits13-15 = (rec[1] - 1) & 7 and its sanitiser discards anything > 4,
+    # so 1..4 are the only legal values. 1 = offline, 2 = online, 3 = away.
+    if not online:
+        rec[0x11] = 0x01
+    elif away:
+        rec[0x11] = 0x03
+    else:
+        rec[0x11] = 0x02
     rec[0x12] = (rec2 & 0xFF) if online else 0x00
     _s.pack_into('<H', rec, 0x14, 1 if online else 0)
     _s.pack_into('<I', rec, 0x30, ts & 0xFFFFFFFF)

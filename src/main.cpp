@@ -573,6 +573,8 @@ BOOL WINAPI Mine_MoveFileA(LPCSTR lpExistingFileName, LPCSTR lpNewFileName)
  * Without redirect the delete targets the original POL path (not on disk)
  * and silently fails, so the next inbox enumeration re-renders the row.
  */
+static void GetCallerLocation(void* retAddr, char* out, size_t outSize);
+
 BOOL WINAPI Mine_DeleteFileA(LPCSTR lpFileName)
 {
     std::string redirected;
@@ -591,13 +593,29 @@ BOOL WINAPI Mine_DeleteFileA(LPCSTR lpFileName)
             redirect = true;
 
             void* ret_ip = _ReturnAddress();
-            uint32_t ret_rva = 0;
-            HMODULE polcore = GetModuleHandleA("polcore.dll");
-            if (polcore && (uintptr_t)ret_ip >= (uintptr_t)polcore && (uintptr_t)ret_ip < (uintptr_t)polcore + 0x800000)
-                ret_rva = (uint32_t)((uintptr_t)ret_ip - (uintptr_t)polcore);
+            char caller[64] = {};
+            GetCallerLocation(ret_ip, caller, sizeof(caller));
+
+            /* Retail moves a read message r\b -> r\a; polcore only issues the
+             * delete. Without the copy nothing records that the message was
+             * read, and the next login rewrites it into r\b as unread.
+             * Must skip deletes from xiloader itself -- the startup purge of
+             * r\b would otherwise mark every unread message read. */
+            HMODULE selfMod = GetModuleHandleA(NULL);
+            const bool from_self = selfMod != nullptr &&
+                (uintptr_t)ret_ip >= (uintptr_t)selfMod &&
+                (uintptr_t)ret_ip < (uintptr_t)selfMod + 0x800000;
+            const char* rb = strstr(redirected.c_str(), "\\r\\b\\");
+            if (rb != nullptr && !from_self)
+            {
+                std::string dst = redirected;
+                dst.replace(rb - redirected.c_str(), 5, "\\r\\a\\");
+                CopyFileA(redirected.c_str(), dst.c_str(), FALSE);
+            }
+
             xiloader::console::output(xiloader::color::warning,
-                "MsgHook: DeleteFileA from polcore+0x%X '%s' (redirected from '%s')",
-                ret_rva, redirected.c_str(), lpFileName);
+                "MsgHook: DeleteFileA from %s '%s' (redirected from '%s')",
+                caller, redirected.c_str(), lpFileName);
         }
     }
     return Real_DeleteFileA(redirect ? redirected.c_str() : lpFileName);
@@ -637,7 +655,7 @@ static void GetCallerLocation(void* retAddr, char* out, size_t outSize)
 {
     HMODULE pol = GetModuleHandleA("polcore.dll");
     HMODULE ffxi = GetModuleHandleA("FFXiMain.dll");
-    HMODULE self = GetModuleHandleA("xiloader.exe");
+    HMODULE self = GetModuleHandleA(NULL);
     uintptr_t ip = (uintptr_t)retAddr;
     if (pol && ip >= (uintptr_t)pol && ip < (uintptr_t)pol + 0x800000) {
         wsprintfA(out, "polcore+0x%X", (unsigned)(ip - (uintptr_t)pol));

@@ -69,15 +69,9 @@ static uint32_t OFF_ENABLE_GATE           = 0x99C80;
  * and pump the SM ourselves. */
 static uint32_t OFF_POL_MSG_ROUTER = 0x44A50;
 static uint32_t OFF_POL_SM_STATE   = 0x99408;
-/* Resolved IP string the connect state consumes. FUN_10013A80 treats a
- * leading digit as a literal IP, so seeding this skips the DNS states. */
-static constexpr uint32_t OFF_POL_HOST_STR    = 0x996C0;
 /* Obfuscated host buffer consumed by state 0x14. 66 bytes; the length lives
  * at +0x41 (FUN_10047370 passes src[0x41] as the length). */
 static constexpr uint32_t OFF_POL_HOST_BUF    = 0x99299;
-/* 8-byte obfuscated session token and 16-byte key that state 0x13 feeds to
- * the session-crypto bootstrap (FUN_1001EAB0). */
-static constexpr uint32_t OFF_POL_PARAMS_BLOB = 0x99280;
 static constexpr uint32_t OFF_POL_KEY_BLOB    = 0x99288;
 static constexpr uint32_t OFF_POL_CONN_HANDLE = 0x99250;
 static uint32_t OFF_DONE_FLAG2            = 0x99244;
@@ -98,27 +92,10 @@ static constexpr uint32_t OFF_POL_ROUTER_MODE = 0x99414;
  * polcore's heap -- allocating it with xiloader's CRT corrupts the heap on the
  * SM's next teardown through case 2/3. */
 static constexpr uint32_t OFF_POL_MALLOC = 0x51B95;
-
-/* Receive pump. Real entry is 0x45480; 0x45495 is past the prologue. */
-static constexpr uint32_t OFF_POL_RECV_PUMP = 0x45480;
 /* Per-connection receive; safe to call holding the normal locks. */
 static constexpr uint32_t OFF_POL_RECV_CONN = 0x15C30;
 /* FUN_10014650(slot, 1) -- tears a connection slot down. */
 static constexpr uint32_t OFF_POL_CONN_RELEASE = 0x14650;
-
-/* The pp router's "last error" slot and its mirrors.
- *
- * FFXi polls FUN_100458D0, which returns DAT_10099254; a value in the -0x8xx
- * family renders as "POL-0008  Connection terminated or not available" and
- * drops the player to an error screen. Observed live at -0x80B after the
- * profile server was restarted underneath a connected client.
- *
- * These belong to the pp/push connection, NOT the game's lobby connection, so
- * clearing them cannot mask a real gameplay network fault. */
-static constexpr uint32_t OFF_POL_LAST_ERROR      = 0x99254;
-static constexpr uint32_t OFF_POL_LAST_ERR_MIRROR = 0x9AA60;
-static constexpr uint32_t OFF_POL_CONN_ERROR      = 0x9AA14;
-static constexpr uint32_t OFF_POL_ROUTER_ERR      = 0x9940C;
 
 /* NOTE: clearing these from the worker does NOT prevent the POL-0008 error
  * screen. FFXi polls for the error every frame while this thread ticks far
@@ -192,7 +169,6 @@ static constexpr uint32_t CONN_KEY_LEN    = 0x39EC; /* i32 */
 static constexpr uint32_t CONN_KEY_BUF    = 0x39F0; /* ptr, THE case-5 gate  */
 static constexpr uint32_t CONN_KEY_BUF_B  = 0x39F4; /* ptr */
 static constexpr uint32_t CONN_KEY_MASK_A = 0x39F8; /* u32 */
-static constexpr uint32_t CONN_KEY_MASK_B = 0x39FC; /* u32 */
 /* Port override read by push SM case 2/3; 0 means use the default 0xC828. */
 static constexpr uint32_t CONN_PORT_OVERRIDE = 0x2A8;
 
@@ -320,15 +296,10 @@ static uint32_t OFF_FRIEND_CONN_INIT   = 0xF7550;
 /* FUN_046FFFD0 -- friend system initializer. Allocs DAT_04AEE768 (~86KB),
  * copies account/strings into it, calls FUN_04707550. */
 static uint32_t OFF_FRIEND_SYS_INIT    = 0xEFFD0;
-/* FUN_04713260 -- calls FUN_046FFFD0 if FUN_046EC130 returns 1. */
-static constexpr uint32_t OFF_FRIEND_INIT_WRAP   = 0x103260;
 /* FUN_04703150 -- common inner sender invoked by every submit that registers a
  * callback at +0x104C. __thiscall(this, op_table_ptr), ret 4. Dispatches by
  * the virtual at *op_table[0]: 0x17 retry, 0x16 OK, else fail (0x10). */
 static uint32_t OFF_FRIEND_INNER_SEND = 0xF3150;
-/* FUN_04707520 -- friend-system network sender wrapper. Returns 2 when
- * notif_mgr_global is NULL, else forwards to FUN_04702350. */
-static constexpr uint32_t OFF_FRIEND_SEND       = 0xF7520;
 /* FUN_04728A00 -- error/notification message dispatcher.
  * __cdecl(int category, int id) -- looks up + shows message by category+id. */
 static uint32_t OFF_SHOW_ERROR        = 0x118A00;
@@ -338,48 +309,15 @@ static uint32_t OFF_SHOW_ERROR        = 0x118A00;
  * thunk; Detours relocates the rel32 so trampoline forwarding is safe. */
 static uint32_t OFF_CHAT_APPEND       = 0x127AA0;
 static constexpr uint32_t OFF_CHAT_LOG_PTR      = 0x577150;
-typedef int (__cdecl* FnMsgProcess)(uint32_t a1, uint32_t a2, uint32_t mode, uint32_t a4, uint32_t* src);
-static FnMsgProcess Real_MsgProcess = nullptr;
-static int s_msgprocess_log_count = 0;
-static int __cdecl Mine_MsgProcess(uint32_t a1, uint32_t a2, uint32_t mode, uint32_t a4, uint32_t* src)
-{
-    if (s_msgprocess_log_count < 8)
-    {
-        s_msgprocess_log_count++;
-        xiloader::console::output(xiloader::color::warning,
-            "MsgProcess[%d]: a1=0x%08X a2=0x%08X mode=%u a4=0x%08X src=0x%08X",
-            s_msgprocess_log_count, a1, a2, mode, a4, (uint32_t)(uintptr_t)src);
-    }
-    return Real_MsgProcess ? Real_MsgProcess(a1, a2, mode, a4, src) : 0;
-}
 
 /* FUN_0480FC90 -- opens mes1rcv or mes2frnd sub-menu (vtable[+0x44]). */
 static uint32_t OFF_FC90 = 0x1FFC90;
-typedef void (__thiscall* FnFC90)(void* self, uint32_t a1, uint32_t a2, uint32_t* src, uint32_t type);
-static FnFC90 Real_FC90 = nullptr;
-static int s_fc90_log_count = 0;
-static void __fastcall Mine_FC90(void* self, void* /*edx*/, uint32_t a1, uint32_t a2, uint32_t* src, uint32_t type)
-{
-    if (s_fc90_log_count < 8)
-    {
-        s_fc90_log_count++;
-        xiloader::console::output(xiloader::color::warning,
-            "FC90[%d]: this=0x%08X a1=0x%08X a2=0x%08X src=0x%08X type=%u",
-            s_fc90_log_count, (uint32_t)(uintptr_t)self, a1, a2,
-            (uint32_t)(uintptr_t)src, type);
-    }
-    if (Real_FC90)
-        Real_FC90((void*)self, a1, a2, src, type);
-}
 
 /* inbox_row_callback (FFXi+0x200420) -- invoked once per inbox row by the
  * friend-system network response handler. param_2 = icon type;
  * param_5 = source_struct pointer. Resolved at runtime; OFF_MSG_OBJ_NATIVE
  * and OFF_INBOX_INIT_DONE both extracted from this function's first 12 bytes. */
 static uint32_t OFF_INBOX_ROW_CALLBACK = 0x200420;
-typedef uint32_t (__cdecl* FnInboxRowCallback)(int msg_obj, uint32_t icon_type,
-    uint32_t* output_or_sentinel, uint32_t arg4, uint32_t* source_struct);
-static FnInboxRowCallback Real_InboxRowCallback = nullptr;
 
 static uint32_t OFF_MSG_OBJ_NATIVE = 0x62FF94;   /* native msg_obj global */
 /* Store 3 container pointer. Resolved at runtime from the entry accessor
@@ -549,16 +487,6 @@ struct NotifMessage {
      * notification queue (polcore+0xAA980) after a b/->a/ move. */
     uint32_t timestamp;
 };
-
-/* (sender_first_byte | timestamp << 8) for natively-dismissed rows
- * (file moved b/->a/). Loose match -- short-lived suppression only. */
-static std::set<uint64_t> s_dismissed_row_keys;
-static std::mutex s_dismissed_mtx;
-static uint64_t make_dismissed_key(const char* sender, uint32_t timestamp)
-{
-    uint8_t s0 = sender ? (uint8_t)sender[0] : 0;
-    return ((uint64_t)timestamp << 8) | s0;
-}
 static std::queue<NotifMessage> s_notif_queue;
 static std::mutex s_notif_mtx;
 
@@ -1049,8 +977,11 @@ void friend_system::bootstrap(IPOLCoreCom* polcore)
 
     PatchPolcoreTitles();
 
-    /* Write IP early; defer family+port to activate(). */
-    s_FriendPort = 51222;
+    /* Must be the port the proxy actually bound, not the 51222 base: on a
+     * fast relaunch 51222 is still held and bind_free falls back to 51223+.
+     * A stale 51222 here points polcore at a dead port and every slot-0 SM
+     * (NotifPickup, friend_status, WhoIs) aborts with status -33. */
+    s_FriendPort = s_proxyProfilePort;
     HMODULE hPC = GetModuleHandleA(polcore_module());
     if (hPC)
     {
@@ -1304,7 +1235,6 @@ static int  s_pump_slot            = -1;
 static int  s_pump_count           = 0;
 static bool s_resync_pending       = false;
 static bool s_ui_was_ready         = false;
-static DWORD s_last_ui_resync      = 0;
 static bool s_populate_pending     = false;
 static int  s_wait_ticks           = 0;
 static bool s_patches_applied      = false;
@@ -1522,19 +1452,6 @@ static void __cdecl HandleMessageClick()
     }
 }
 
-/* FUN_04728A00 hook -- broadest net for error/notification dispatch.
- * __thiscall(this, int category, int id), ret 8. __fastcall trampoline. */
-typedef void (__thiscall* FnShowError)(void* self, int category, int id);
-static FnShowError Real_ShowError = nullptr;
-static void __fastcall Mine_ShowError(void* self, void* /*edx*/, int category, int id)
-{
-    xiloader::console::output(xiloader::color::warning,
-        "ShowError: this=0x%08X category=%d id=%d",
-        (uint32_t)(uintptr_t)self, category, id);
-    if (Real_ShowError)
-        Real_ShowError(self, category, id);
-}
-
 /* Accept op_table entries (FFXi+0x361220). Each is a state-machine method
  * `fn(this, arg)`; one is registered at friend_mgr+0x1050 and polled by the
  * FFXi per-frame loop. */
@@ -1566,50 +1483,13 @@ typedef int (__cdecl* FnAcceptOp)(uint32_t, uint32_t, uint32_t, uint32_t);
 ACCEPT_OP_TRAMP(0) ACCEPT_OP_TRAMP(1) ACCEPT_OP_TRAMP(2) ACCEPT_OP_TRAMP(3)
 ACCEPT_OP_TRAMP(4) ACCEPT_OP_TRAMP(5) ACCEPT_OP_TRAMP(6) ACCEPT_OP_TRAMP(7)
 #undef ACCEPT_OP_TRAMP
-static PVOID s_accept_op_mine[] = {
-    (PVOID)Mine_AcceptOp_0, (PVOID)Mine_AcceptOp_1,
-    (PVOID)Mine_AcceptOp_2, (PVOID)Mine_AcceptOp_3,
-    (PVOID)Mine_AcceptOp_4, (PVOID)Mine_AcceptOp_5,
-    (PVOID)Mine_AcceptOp_6, (PVOID)Mine_AcceptOp_7,
-};
 
 /* Polcore slot allocator (FUN_0459EBA0). Returns slot index (0..3) or negative. */
 static uint32_t OFF_POL_SLOT_ALLOC = 0x1EBA0;
-typedef int (__cdecl* FnPolSlotAlloc)();
-static FnPolSlotAlloc Real_PolSlotAlloc = nullptr;
-static int __cdecl Mine_PolSlotAlloc()
-{
-    void* ret_ip = _ReturnAddress();
-    uint32_t caller_rva = (uint32_t)((uintptr_t)ret_ip - (uintptr_t)s_polBase);
-    int slot = Real_PolSlotAlloc ? Real_PolSlotAlloc() : -1;
-    xiloader::console::output_to_channel("friend",
-        "PolSlotAlloc: slot=%d caller=pol+0x%X", slot, caller_rva);
-    return slot;
-}
 
 /* Polcore registrar (FUN_0459FF20). Per-op init's final call: binds op_type
  * (desc+0x323) and timeout (desc+0x326). __cdecl(desc, op_type, timeout). */
 static uint32_t OFF_POL_REGISTRAR  = 0x1FF20;
-typedef void (__cdecl* FnPolRegistrar)(uint8_t* desc, uint8_t op_type, uint16_t timeout);
-static FnPolRegistrar Real_PolRegistrar = nullptr;
-static void __cdecl Mine_PolRegistrar(uint8_t* desc, uint8_t op_type, uint16_t timeout)
-{
-    void* ret_ip = _ReturnAddress();
-    uint32_t caller_rva = (uint32_t)((uintptr_t)ret_ip - (uintptr_t)s_polBase);
-    /* Compute slot from descriptor address */
-    int slot = -1;
-    if (desc != nullptr && s_polBase != nullptr)
-    {
-        uint32_t off = (uint32_t)((uintptr_t)desc - (uintptr_t)s_polBase) - OFF_DESC_ARRAY;
-        if (off < 4 * OFF_DESC_STRIDE && (off % OFF_DESC_STRIDE) == 0)
-            slot = (int)(off / OFF_DESC_STRIDE);
-    }
-    xiloader::console::output_to_channel("friend",
-        "PolRegistrar: slot=%d op_type=0x%02X timeout=0x%X caller=pol+0x%X",
-        slot, op_type, timeout, caller_rva);
-    if (Real_PolRegistrar)
-        Real_PolRegistrar(desc, op_type, timeout);
-}
 
 /* Polcore pumper-gate hook (FUN_0459EBD0). Every per-slot pumper enters here
  * to check active+timeout. __cdecl(char* desc, int slot). Pumper RVA map:
@@ -1618,65 +1498,14 @@ static void __cdecl Mine_PolRegistrar(uint8_t* desc, uint8_t op_type, uint16_t t
  *   0x24170 (2,6) BefriendRequest      0x27250 (3,2) Confirmation
  *   0x20BB0 (5,4) accept-class         0x210E0 (5,3) accept-class */
 static uint32_t OFF_POL_PUMP_GATE = 0x1EBD0;
-typedef uint32_t (__cdecl* FnPolPumpGate)(char* desc, int slot);
-static FnPolPumpGate Real_PolPumpGate = nullptr;
 
 /* Polcore notification queue enqueuer FUN_0459C570 -- type-3/4/5/6 enqueue
  * chokepoint. __cdecl(uint32_t type, void* data, int len). */
 static uint32_t OFF_POL_NOTIF_ENQUEUE = 0x1C570;
-typedef int (__cdecl* FnPolNotifEnqueue)(uint32_t type, void* data, int len);
-static FnPolNotifEnqueue Real_PolNotifEnqueue = nullptr;
-static int s_notif_enq_log_count = 0;
-static int __cdecl Mine_PolNotifEnqueue(uint32_t type, void* data, int len)
-{
-    if (s_notif_enq_log_count < 32)
-    {
-        s_notif_enq_log_count++;
-        void* ret = _ReturnAddress();
-        uint32_t ret_rva = (s_polBase != nullptr)
-            ? (uint32_t)((uintptr_t)ret - (uintptr_t)s_polBase) : 0;
-        char data_preview[64] = {};
-        if (data != nullptr && len != 0)
-        {
-            int show = (len < 0) ? 16 : (len < 16 ? len : 16);
-            __try {
-                int n = 0;
-                for (int i = 0; i < show && n < (int)sizeof(data_preview) - 4; i++)
-                    n += wsprintfA(data_preview + n, "%02X ", ((uint8_t*)data)[i]);
-            } __except(EXCEPTION_EXECUTE_HANDLER) {
-                strcpy_s(data_preview, sizeof(data_preview), "(unreadable)");
-            }
-        }
-        xiloader::console::output_to_channel("friend",
-            "PolNotifEnq[%d]: type=%u data=0x%08X len=%d ret=pol+0x%X bytes=[%s]",
-            s_notif_enq_log_count, type, (uint32_t)(uintptr_t)data, len, ret_rva,
-            data_preview);
-    }
-    return Real_PolNotifEnqueue ? Real_PolNotifEnqueue(type, data, len) : 0;
-}
 
 /* Polcore notification callback registrar FUN_0459B500 -- sets DAT_0462A974,
  * the callback that FUN_0459C600 dispatches queue entries to. */
 static uint32_t OFF_POL_NOTIF_CB_REG = 0x1B500;
-static constexpr uint32_t OFF_POL_NOTIF_CB_PTR = 0xAA974;
-typedef void (__cdecl* FnPolNotifCBReg)(void* fn);
-static FnPolNotifCBReg Real_PolNotifCBReg = nullptr;
-static int s_notif_cb_log_count = 0;
-static void __cdecl Mine_PolNotifCBReg(void* fn)
-{
-    if (s_notif_cb_log_count < 8)
-    {
-        s_notif_cb_log_count++;
-        void* ret = _ReturnAddress();
-        uint32_t ret_rva = (s_polBase != nullptr)
-            ? (uint32_t)((uintptr_t)ret - (uintptr_t)s_polBase) : 0;
-        xiloader::console::output_to_channel("friend",
-            "PolNotifCBReg[%d]: fn=0x%08X (ret=pol+0x%X)",
-            s_notif_cb_log_count, (uint32_t)(uintptr_t)fn, ret_rva);
-    }
-    if (Real_PolNotifCBReg)
-        Real_PolNotifCBReg(fn);
-}
 
 /* Real handler for polcore's status-change notification slot (pol+0xAA974).
  *
@@ -1703,48 +1532,6 @@ static void __cdecl Mine_PolStatusNotify(int opcode, void* data)
 /* Polcore body-fetch driver FUN_045A7550 -- fires on click-to-read body
  * fetch. __cdecl(int slot). */
 static uint32_t OFF_POL_BODY_FETCH_DRIVER = 0x27550;
-typedef int (__cdecl* FnPolBodyFetchDriver)(int slot);
-static FnPolBodyFetchDriver Real_PolBodyFetchDriver = nullptr;
-static int s_body_fetch_log_count = 0;
-static int __cdecl Mine_PolBodyFetchDriver(int slot)
-{
-    if (s_body_fetch_log_count < 8)
-    {
-        s_body_fetch_log_count++;
-        xiloader::console::output_to_channel("friend",
-            "BodyFetchDriver[%d]: slot=%d  (FUN_045A7550 entered)",
-            s_body_fetch_log_count, slot);
-    }
-    int rv = Real_PolBodyFetchDriver ? Real_PolBodyFetchDriver(slot) : 0;
-    if (s_body_fetch_log_count <= 8)
-    {
-        xiloader::console::output_to_channel("friend",
-            "BodyFetchDriver[%d]: returned %d", s_body_fetch_log_count, rv);
-    }
-    return rv;
-}
-/* Chat dispatcher hook (FFXi+0x80CF6). Fires for every typed chat command
- * that reaches the standard chat input parser. If /befriend doesn't trigger
- * this, our build's chat input is using a different code path entirely. */
-typedef int (__cdecl* FnChatDispatcher)(void* args);
-static FnChatDispatcher Real_ChatDispatcher = nullptr;
-static int s_chat_disp_log_count = 0;
-static int __cdecl Mine_ChatDispatcher(void* args)
-{
-    if (s_chat_disp_log_count < 16)
-    {
-        s_chat_disp_log_count++;
-        char input[128] = {};
-        __try {
-            const char* sm = (const char*)(s_ffxiBase + OFF_FFXI_SERVMES_BUF);
-            for (int i = 0; i < 127 && sm[i]; i++) input[i] = sm[i];
-        } __except (EXCEPTION_EXECUTE_HANDLER) {}
-        xiloader::console::output_to_channel("friend",
-            "ChatDispatcher[%d]: args=0x%p servmes='%s'",
-            s_chat_disp_log_count, args, input);
-    }
-    return Real_ChatDispatcher ? Real_ChatDispatcher(args) : 0;
-}
 
 
 /* /befriend chat command handler hook (FFXi+0x79F50). Logs the token count
@@ -1888,8 +1675,6 @@ static uint32_t __cdecl Mine_BefriendOpSend(void* slot, uint32_t advance)
 static uint32_t OFF_POL_SEND_BODY_SM = 0x1F970;
 typedef int (__cdecl* FnPolSendBodySm)(void* desc, uint32_t size, uint32_t type, void* body);
 static FnPolSendBodySm Real_PolSendBodySm = nullptr;
-static int s_send_body_log_count = 0;
-static int s_send_notif_log_count = 0;
 static int __cdecl Mine_PolSendBodySm(void* desc, uint32_t size, uint32_t type, void* body)
 {
     if (body == nullptr) {
@@ -1957,23 +1742,6 @@ static uint32_t __fastcall Mine_BefriendInner(void* self, void* /*edx*/, uint32_
     return r;
 }
 
-/* Polcore CallerC init (polcore+0x28330). FFXi calls this when /befriend is
- * dispatched. Allocates a slot, runs auth_builder, calls setup_connection
- * with conn_type=8. The native per-frame pump then drives the slot through
- * the BefriendRequest driver (polcore+0x24170). */
-static constexpr uint32_t OFF_POL_CALLERC_INIT = 0x28330;
-typedef int (__cdecl* FnPolCallerCInit)();
-static FnPolCallerCInit Real_PolCallerCInit = nullptr;
-static int __cdecl Mine_PolCallerCInit()
-{
-    void* ret_ip = _ReturnAddress();
-    uint32_t caller_rva = (uint32_t)((uintptr_t)ret_ip - (uintptr_t)s_polBase);
-    int slot = Real_PolCallerCInit ? Real_PolCallerCInit() : -1;
-    xiloader::console::output_to_channel("friend",
-        "PolCallerCInit: slot=%d caller=pol+0x%X", slot, caller_rva);
-    return slot;
-}
-
 /* Polcore BefriendRequest driver (polcore+0x24170). Per-slot pumper for the
  * 14-mode befriend state machine: TCP connect -> auth (2,6) -> send 0x130-byte
  * BefriendRequest -> recv response -> parse 0xA8-stride friend records -> close.
@@ -1981,29 +1749,6 @@ static int __cdecl Mine_PolCallerCInit()
  * desc[+0x324]=6 matches. If no PolBefriendDriver entry appears in the log
  * after /befriend is typed, the per-frame pump never fired for this slot. */
 static uint32_t OFF_POL_BEFRIEND_DRIVER = 0x24170;
-typedef int (__cdecl* FnPolBefriendDriver)(int slot);
-static FnPolBefriendDriver Real_PolBefriendDriver = nullptr;
-static int s_befriend_driver_log_count = 0;
-static int __cdecl Mine_PolBefriendDriver(int slot)
-{
-    if (s_befriend_driver_log_count < 32)
-    {
-        s_befriend_driver_log_count++;
-        uint8_t* desc = (s_polBase != nullptr) ? (s_polBase + OFF_DESC_ARRAY + slot * OFF_DESC_STRIDE) : nullptr;
-        uint8_t mode = desc ? desc[0x08] : 0xFF;
-        uint8_t sub  = desc ? desc[0x09] : 0xFF;
-        xiloader::console::output_to_channel("friend",
-            "PolBefriendDriver[%d]: slot=%d mode=%u sub=%u",
-            s_befriend_driver_log_count, slot, mode, sub);
-    }
-    int rv = Real_PolBefriendDriver ? Real_PolBefriendDriver(slot) : 0;
-    if (s_befriend_driver_log_count <= 32)
-    {
-        xiloader::console::output_to_channel("friend",
-            "PolBefriendDriver[%d]: returned %d", s_befriend_driver_log_count, rv);
-    }
-    return rv;
-}
 
 /* FUN_0459EEB0(record, friend_table_entry, is_new) -- central insert/update
  * for polcore friend table at +0xB40D8. Writes record to entry+0xA0 (15B
@@ -2014,309 +1759,11 @@ static int __cdecl Mine_PolBefriendDriver(int slot)
 static uint32_t OFF_POL_FRIEND_INSERTER = 0x1EEB0;
 static uint32_t OFF_POL_BITMAP_OP       = 0x23CF0;
 
-typedef void (__cdecl* FnFriendInserter)(uint32_t* record, uint64_t* entry, int is_new);
-static FnFriendInserter Real_FriendInserter = nullptr;
-static int s_friend_inserter_log_count = 0;
-static void __cdecl Mine_FriendInserter(uint32_t* record, uint64_t* entry, int is_new)
-{
-    if (s_friend_inserter_log_count < 32)
-    {
-        s_friend_inserter_log_count++;
-        void* ret_ip = _ReturnAddress();
-        uint32_t caller_rva = (uint32_t)((uintptr_t)ret_ip - (uintptr_t)s_polBase);
-        uint32_t entry_rva = (s_polBase != nullptr)
-            ? (uint32_t)((uintptr_t)entry - (uintptr_t)s_polBase) : 0;
-        char name[16] = {};
-        __try
-        {
-            /* record byte offset 24 = the 15-byte name field. */
-            memcpy(name, (char*)record + 24, 15);
-        }
-        __except(EXCEPTION_EXECUTE_HANDLER) {}
-        xiloader::console::output_to_channel("friend",
-            "FriendInserter[%d]: entry=pol+0x%X is_new=%d name='%s' caller=pol+0x%X",
-            s_friend_inserter_log_count, entry_rva, is_new, name, caller_rva);
-    }
-    if (Real_FriendInserter)
-        Real_FriendInserter(record, entry, is_new);
-}
-
-typedef uint8_t (__cdecl* FnBitmapOp)(int table_flag, int index, int op);
-static FnBitmapOp Real_BitmapOp = nullptr;
-static int s_bitmap_log_count = 0;
-static uint8_t __cdecl Mine_BitmapOp(int table_flag, int index, int op)
-{
-    uint8_t rv = Real_BitmapOp ? Real_BitmapOp(table_flag, index, op) : 0;
-    /* Skip op=2 (read) to avoid log spam. */
-    if (op != 2 && s_bitmap_log_count < 64)
-    {
-        s_bitmap_log_count++;
-        void* ret_ip = _ReturnAddress();
-        uint32_t caller_rva = (uint32_t)((uintptr_t)ret_ip - (uintptr_t)s_polBase);
-        xiloader::console::output_to_channel("friend",
-            "FriendBitmap[%d]: %s table=%d idx=%d caller=pol+0x%X",
-            s_bitmap_log_count, op ? "SET" : "CLEAR", table_flag, index, caller_rva);
-    }
-    return rv;
-}
-
-static uint32_t __cdecl Mine_PolPumpGate(char* desc, int slot)
-{
-    void* ret_ip = _ReturnAddress();
-    uint32_t pumper_rva = (uint32_t)((uintptr_t)ret_ip - (uintptr_t)s_polBase);
-    uint8_t mode = desc ? (uint8_t)desc[0] : 0;       /* 0 = slot free */
-    uint8_t state = desc ? (uint8_t)desc[8] : 0;      /* SM cursor */
-    uint8_t substate = desc ? (uint8_t)desc[9] : 0;   /* retry counter / sub */
-    /* Throttle: log only on slot transition (inactive ticks would flood). */
-    static uint8_t s_last_mode[4] = {};
-    static uint8_t s_last_state[4] = {};
-    if (slot >= 0 && slot < 4)
-    {
-        if (mode != s_last_mode[slot] || state != s_last_state[slot])
-        {
-            xiloader::console::output_to_channel("friend",
-                "PolPumpGate: slot=%d mode=0x%02X state=%u sub=%u pumper=pol+0x%X",
-                slot, mode, state, substate, pumper_rva);
-            s_last_mode[slot] = mode;
-            s_last_state[slot] = state;
-        }
-    }
-    return Real_PolPumpGate ? Real_PolPumpGate(desc, slot) : 0;
-}
-
 /* polcore_slot_teardown FUN_0459FBD0 -- called at the end of every slot op
  * with the result code (1 = success, negative = error). */
 static uint32_t OFF_POL_SLOT_TEARDOWN = 0x1FBD0;
-typedef void (__cdecl* FnPolSlotTeardown)(uint8_t* desc, int result);
-static FnPolSlotTeardown Real_PolSlotTeardown = nullptr;
-static void __cdecl Mine_PolSlotTeardown(uint8_t* desc, int result)
-{
-    void* ret_ip = _ReturnAddress();
-    uint32_t caller_rva = (uint32_t)((uintptr_t)ret_ip - (uintptr_t)s_polBase);
-    int slot = -1;
-    uint8_t state = 0;
-    if (desc != nullptr && s_polBase != nullptr)
-    {
-        uint32_t off = (uint32_t)((uintptr_t)desc - (uintptr_t)s_polBase) - OFF_DESC_ARRAY;
-        if (off < 4 * OFF_DESC_STRIDE && (off % OFF_DESC_STRIDE) == 0)
-            slot = (int)(off / OFF_DESC_STRIDE);
-        state = desc[8];
-    }
-    xiloader::console::output_to_channel("friend",
-        "PolSlotTeardown: slot=%d state=%u result=%d (0x%X) caller=pol+0x%X",
-        slot, state, result, (uint32_t)result, caller_rva);
-    if (Real_PolSlotTeardown)
-        Real_PolSlotTeardown(desc, result);
-}
-
-/* FUN_046F7910 -- accept-op result poll, called by op[4] sub-state 1.
- *   >0 = polcore SM succeeded; 0 = pending; <0 = failed, op[4] returns 5. */
-static constexpr uint32_t OFF_FFXI_ACCEPT_POLL = 0xF7910;
-typedef int (__cdecl* FnAcceptPoll)(void);
-static FnAcceptPoll Real_AcceptPoll = nullptr;
-static int s_accept_poll_log_count = 0;
-static int __cdecl Mine_AcceptPoll(void)
-{
-    int rv = Real_AcceptPoll ? Real_AcceptPoll() : 0;
-    /* Log only on result transition or negative outcome to avoid spam. */
-    static int s_last = 0;
-    if (rv != s_last && (rv < 0 || rv > 0 || s_accept_poll_log_count < 20))
-    {
-        s_accept_poll_log_count++;
-        xiloader::console::output_to_channel("friend",
-            "AcceptPoll: -> %d (0x%X)", rv, (uint32_t)rv);
-        s_last = rv;
-    }
-    return rv;
-}
-
-/* Chat-append hook (FUN_04737AA0). __thiscall, ret 0x14 (5 stack args). */
-typedef bool (__thiscall* FnChatAppendHook)(void*, const char*, const void*, int, int, int);
-static FnChatAppendHook Real_ChatAppend = nullptr;
-static bool __fastcall Mine_ChatAppend(void* self, void* /*edx*/, const char* msg,
-                                       const void* flags, int a3, int a4, int a5)
-{
-    void* ret_ip = _ReturnAddress();
-    uint32_t rva = (uint32_t)((uintptr_t)ret_ip - (uintptr_t)s_ffxiBase);
-    if (msg)
-    {
-        xiloader::console::output_to_channel("friend",
-            "ChatAppend: ret=FFXi+0x%X '%.120s'", rva, msg);
-    }
-    if (Real_ChatAppend)
-        return Real_ChatAppend(self, msg, flags, a3, a4, a5);
-    return false;
-}
-
-/* FUN_04739D50 hook -- wrapper that calls FUN_04737AA0 with hardcoded flag
- * bytes (0x7B, 3, 0). __cdecl(msg), ret 4. Hooking here exposes the
- * grandparent return address (the actual call site). */
-typedef bool (__cdecl* FnChatWrapper)(const char* msg);
-static FnChatWrapper Real_ChatWrapper = nullptr;
-static bool __cdecl Mine_ChatWrapper(const char* msg)
-{
-    void* ret_ip = _ReturnAddress();
-    uint32_t rva = (uint32_t)((uintptr_t)ret_ip - (uintptr_t)s_ffxiBase);
-    if (msg)
-    {
-        xiloader::console::output_to_channel("friend",
-            "ChatWrapper: ret=FFXi+0x%X '%.120s'", rva, msg);
-    }
-    if (Real_ChatWrapper)
-        return Real_ChatWrapper(msg);
-    return false;
-}
-static constexpr uint32_t OFF_CHAT_WRAPPER = 0x129D50;
-
-/* FUN_04707520 hook -- friend-system network sender. Wider net than
- * FRIEND_SUBMIT: catches every accept/decline/reply send. */
-typedef uint32_t (__cdecl* FnFriendSend)(uint32_t a1, uint32_t a2, uint32_t a3,
-                                         uint32_t a4, uint32_t a5);
-static FnFriendSend Real_FriendSend = nullptr;
-static uint32_t __cdecl Mine_FriendSend(uint32_t a1, uint32_t a2, uint32_t a3,
-                                        uint32_t a4, uint32_t a5)
-{
-    xiloader::console::output_to_channel("friend",
-        "FriendSend: a1=0x%08X a2=0x%08X a3=0x%08X a4=0x%08X a5=0x%08X",
-        a1, a2, a3, a4, a5);
-    uint32_t r = Real_FriendSend ? Real_FriendSend(a1, a2, a3, a4, a5) : 2;
-    xiloader::console::output_to_channel("friend",
-        "FriendSend: returned %u", r);
-    return r;
-}
-
-/* FUN_04703150 hook -- inner chokepoint sender. */
-typedef uint32_t (__thiscall* FnInnerSend)(void* self, void* op_table);
-static FnInnerSend Real_InnerSend = nullptr;
-static uint32_t __fastcall Mine_InnerSend(void* self, void* /*edx*/, void* op_table)
-{
-    void* ret_ip = _ReturnAddress();
-    uint32_t ret_rva = (uint32_t)((uintptr_t)ret_ip - (uintptr_t)s_ffxiBase);
-    uint32_t op_table_rva = op_table
-        ? (uint32_t)((uintptr_t)op_table - (uintptr_t)s_ffxiBase) : 0;
-    /* First 4 dwords of op_table identify the operation. */
-    uint32_t t0 = 0, t1 = 0, t2 = 0, t3 = 0;
-    if (op_table)
-    {
-        __try {
-            t0 = ((uint32_t*)op_table)[0];
-            t1 = ((uint32_t*)op_table)[1];
-            t2 = ((uint32_t*)op_table)[2];
-            t3 = ((uint32_t*)op_table)[3];
-        } __except (EXCEPTION_EXECUTE_HANDLER) {}
-    }
-    xiloader::console::output_to_channel("friend",
-        "InnerSend: this=0x%08X ret=FFXi+0x%X op_table=FFXi+0x%X [0x%08X 0x%08X 0x%08X 0x%08X]",
-        (uint32_t)(uintptr_t)self, ret_rva, op_table_rva, t0, t1, t2, t3);
-    uint32_t r = Real_InnerSend ? Real_InnerSend(self, op_table) : 0x10;
-    xiloader::console::output_to_channel("friend",
-        "InnerSend: returned %u (0x%X)", r, r);
-    return r;
-}
-
-/* FUN_04702210 hook -- underlying friend submit, regardless of wrapper. */
-typedef uint32_t (__thiscall* FnRealSend)(void*, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t,
-                                          uint32_t, uint32_t, uint32_t, uint32_t, uint32_t);
-static FnRealSend Real_RealSend = nullptr;
-static uint32_t __fastcall Mine_RealSend(void* self, void* /*edx*/,
-                                         uint32_t a1, uint32_t a2, uint32_t a3, uint32_t a4,
-                                         uint32_t a5, uint32_t a6, uint32_t a7, uint32_t a8,
-                                         uint32_t a9, uint32_t a10)
-{
-    void* ret_ip = _ReturnAddress();
-    uint32_t ret_rva = (uint32_t)((uintptr_t)ret_ip - (uintptr_t)s_ffxiBase);
-    xiloader::console::output_to_channel("friend",
-        "RealSend: this=0x%08X ret=FFXi+0x%X args=[%08X %08X %08X %08X %08X %08X %08X %08X %08X %08X]",
-        (uint32_t)(uintptr_t)self, ret_rva, a1, a2, a3, a4, a5, a6, a7, a8, a9, a10);
-    uint32_t r = Real_RealSend ? Real_RealSend(self, a1, a2, a3, a4, a5, a6, a7, a8, a9, a10) : 0x10;
-    xiloader::console::output_to_channel("friend",
-        "RealSend: returned %u (0x%X)", r, r);
-    return r;
-}
 
 static bool send_acpt_request(const char* target_charname, const char* nickname);
-
-/* FUN_0480FBB0 hook -- never fires for Read (which uses msg_dismiss_action_v2
- * + friend_dismiss_submit_outer op_code 0x19). Kept for visibility. */
-typedef void (__thiscall* FnDismissSubmit)(void* self, uint32_t p2, uint32_t p3,
-                                            uint32_t p4, uint32_t p5);
-static FnDismissSubmit Real_DismissSubmit = nullptr;
-static void __fastcall Mine_DismissSubmit(void* self, void* /*edx*/,
-                                          uint32_t p2, uint32_t p3,
-                                          uint32_t p4, uint32_t p5)
-{
-    uint32_t conn_state = 0;
-    if (s_ffxiBase != nullptr)
-        conn_state = *(uint32_t*)(s_ffxiBase + OFF_FRIEND_CONN_STATE);
-    xiloader::console::output_to_channel("friend",
-        "DismissSubmit (FUN_0480FBB0): this=0x%08X p2=%08X DAT_04AEE900=0x%08X",
-        (uint32_t)(uintptr_t)self, p2, conn_state);
-    if (Real_DismissSubmit)
-        Real_DismissSubmit(self, p2, p3, p4, p5);
-}
-
-/* msg_dismiss_action_v2 hook -- inbox menu-action handler. */
-typedef void (__thiscall* FnMsgDismissAction)(void* self, short menu_group,
-                                               short action_id);
-static FnMsgDismissAction Real_MsgDismissAction = nullptr;
-static void __fastcall Mine_MsgDismissAction(void* self, void* /*edx*/,
-                                              short menu_group, short action_id)
-{
-    uint32_t conn_state = 0;
-    if (s_ffxiBase != nullptr)
-        conn_state = *(uint32_t*)(s_ffxiBase + OFF_FRIEND_CONN_STATE);
-    /* mes2frnd this+0x18..0x24 = dismissal target id (matched against polcore
-     * queue entries' iStack_48/44/18/14 in dismiss_op1_send). */
-    uint32_t f18 = 0, f1C = 0, f20 = 0, f24 = 0;
-    __try {
-        uint8_t* p = (uint8_t*)self;
-        f18 = *(uint32_t*)(p + 0x18);
-        f1C = *(uint32_t*)(p + 0x1C);
-        f20 = *(uint32_t*)(p + 0x20);
-        f24 = *(uint32_t*)(p + 0x24);
-    } __except (EXCEPTION_EXECUTE_HANDLER) {}
-    xiloader::console::output_to_channel("friend",
-        "MsgDismissAction: this=0x%08X menu=%d action=%d this+0x18..0x24=[%08X %08X %08X %08X] DAT_04AEE900=0x%08X",
-        (uint32_t)(uintptr_t)self, (int)menu_group, (int)action_id,
-        f18, f1C, f20, f24, conn_state);
-    if (Real_MsgDismissAction)
-        Real_MsgDismissAction(self, menu_group, action_id);
-}
-
-/* FUN_046FFFD0 hook -- friend system initializer. */
-typedef uint8_t (__cdecl* FnFriendSysInit)(uint32_t p1, uint32_t p2, uint32_t p3,
-                                            const char* p4, const char* p5,
-                                            const char* p6, uint32_t p7);
-static FnFriendSysInit Real_FriendSysInit = nullptr;
-static uint8_t __cdecl Mine_FriendSysInit(uint32_t p1, uint32_t p2, uint32_t p3,
-                                          const char* p4, const char* p5,
-                                          const char* p6, uint32_t p7)
-{
-    xiloader::console::output_to_channel("friend",
-        "FriendSysInit (FUN_046FFFD0): p1=%u accid=%08X p3=%08X p4=%s p5=%s p6=%s p7=%08X",
-        p1, p2, p3,
-        p4 ? p4 : "(null)", p5 ? p5 : "(null)", p6 ? p6 : "(null)", p7);
-    uint8_t r = Real_FriendSysInit ? Real_FriendSysInit(p1, p2, p3, p4, p5, p6, p7) : 0;
-    uint32_t conn_state = 0;
-    if (s_ffxiBase != nullptr)
-        conn_state = *(uint32_t*)(s_ffxiBase + OFF_FRIEND_CONN_STATE);
-    xiloader::console::output_to_channel("friend",
-        "FriendSysInit returned %u, DAT_04AEE900 now = 0x%08X", r, conn_state);
-    return r;
-}
-
-/* FUN_04713260 hook -- wrapper for FUN_046FFFD0. */
-typedef uint32_t (__cdecl* FnFriendInitWrap)(int self);
-static FnFriendInitWrap Real_FriendInitWrap = nullptr;
-static uint32_t __cdecl Mine_FriendInitWrap(int self)
-{
-    xiloader::console::output_to_channel("friend",
-        "FriendInitWrap (FUN_04713260): self=0x%08X", self);
-    uint32_t r = Real_FriendInitWrap ? Real_FriendInitWrap(self) : 0;
-    xiloader::console::output_to_channel("friend",
-        "FriendInitWrap returned %u", r);
-    return r;
-}
 
 /* FUN_04707550 hook -- DAT_04AEE900 setter. */
 typedef uint32_t (__cdecl* FnFriendConnInit)(void);
@@ -2336,132 +1783,6 @@ static uint32_t __cdecl Mine_FriendConnInit(void)
     return r;
 }
 
-/* polcore filename decoder hook (polcore+0x1B6D0). */
-typedef int (__cdecl* FnPolFilenameDecoder)(uint32_t* output, uint32_t arg2);
-static FnPolFilenameDecoder Real_PolFilenameDecoder = nullptr;
-static int s_pol_dec_log_count = 0;
-static int __cdecl Mine_PolFilenameDecoder(uint32_t* output, uint32_t arg2)
-{
-    int r = Real_PolFilenameDecoder ? Real_PolFilenameDecoder(output, arg2) : -1;
-    if (s_pol_dec_log_count < 32 && output != nullptr)
-    {
-        s_pol_dec_log_count++;
-        uint32_t f0 = 0, f4 = 0, f30 = 0, f34 = 0;
-        __try {
-            f0  = output[0];   /* iStack_48 in dismiss_op1_send */
-            f4  = output[1];   /* iStack_44 */
-            f30 = output[12];  /* iStack_18 (offset 0x30 / 4) */
-            f34 = output[13];  /* iStack_14 (offset 0x34 / 4) */
-        } __except (EXCEPTION_EXECUTE_HANDLER) {}
-        xiloader::console::output_to_channel("friend",
-            "PolFilenameDec[%d]: r=%d arg2=0x%08X out[0/4/30/34]=[%08X %08X %08X %08X]",
-            s_pol_dec_log_count, r, arg2, f0, f4, f30, f34);
-    }
-    return r;
-}
-
-/* dismiss_op1_send (FFXi+0xF59D0) hook. op_code at this+0x1048 differs by
- * caller (body-fetch=0, dismiss=0x19); polcore reads it inside vtable+0x1F8
- * to decide whether to emit a wire packet. */
-typedef int (__cdecl* FnDismissOp1Send)(int self, int state);
-static FnDismissOp1Send Real_DismissOp1Send = nullptr;
-static int __cdecl Mine_DismissOp1Send(int self, int state)
-{
-    uint32_t seq = 0, op_code = 0;
-    char buf_hex[256] = {};
-    __try {
-        seq     = *(uint16_t*)(self + 8);
-        op_code = *(uint32_t*)(self + 0x1048);
-        /* Dump 80B of this+0xC48 -- the buffer polcore vtable+0x1F8 fills. */
-        const uint8_t* p = (const uint8_t*)(self + 0xC48);
-        int n = 0;
-        for (int i = 0; i < 80 && n < 240; i++)
-            n += wsprintfA(buf_hex + n, "%02x", p[i]);
-    } __except (EXCEPTION_EXECUTE_HANDLER) {}
-
-    xiloader::console::output_to_channel("friend",
-        "DismissOp1Send: this=0x%08X state=%d seq=0x%04X op_code=0x%X",
-        self, state, seq, op_code);
-    xiloader::console::output_to_channel("friend",
-        "DismissOp1Send buf[0:80]: %s", buf_hex);
-
-    int r = Real_DismissOp1Send ? Real_DismissOp1Send(self, state) : 0x10;
-
-    /* Fields polcore_queue_sm_driver case 1 reads for completion check:
-     * this+0x208 (socket handle), this+0x210 (count), this+0x214 (cursor),
-     * this+0x218 (entries left). */
-    uint32_t f208 = 0, f210 = 0, f214 = 0, f218 = 0;
-    __try {
-        f208 = *(uint32_t*)(self + 0x208);
-        f210 = *(uint32_t*)(self + 0x210);
-        f214 = *(uint32_t*)(self + 0x214);
-        f218 = *(uint32_t*)(self + 0x218);
-    } __except (EXCEPTION_EXECUTE_HANDLER) {}
-
-    xiloader::console::output_to_channel("friend",
-        "DismissOp1Send returned %d (0x%X) | post: +0x208=%08X +0x210=%08X +0x214=%08X +0x218=%08X",
-        r, r, f208, f210, f214, f218);
-    return r;
-}
-
-/* polcore_queue_sm_driver (FFXi+0xF4170) hook. __thiscall(self, state, ...);
- * __fastcall with dummy edx matches the calling convention. Capped at 60
- * entries to keep logs readable. */
-typedef int (__fastcall* FnQueueSmDriver)(int self, int /*edx*/, int state, int* entry_out, int* err_out);
-static FnQueueSmDriver Real_QueueSmDriver = nullptr;
-static int s_queue_sm_log_count = 0;
-static int __fastcall Mine_QueueSmDriver(int self, int /*edx*/, int state, int* entry_out, int* err_out)
-{
-    uint32_t f208_pre = 0, f218_pre = 0, f214_pre = 0;
-    __try {
-        f208_pre = *(uint32_t*)(self + 0x208);
-        f218_pre = *(uint32_t*)(self + 0x218);
-        f214_pre = *(uint32_t*)(self + 0x214);
-    } __except (EXCEPTION_EXECUTE_HANDLER) {}
-
-    int r = Real_QueueSmDriver ? Real_QueueSmDriver(self, 0, state, entry_out, err_out) : 0x10;
-
-    if (s_queue_sm_log_count < 60)
-    {
-        s_queue_sm_log_count++;
-        uint32_t f208_post = 0, f218_post = 0, f214_post = 0;
-        __try {
-            f208_post = *(uint32_t*)(self + 0x208);
-            f218_post = *(uint32_t*)(self + 0x218);
-            f214_post = *(uint32_t*)(self + 0x214);
-        } __except (EXCEPTION_EXECUTE_HANDLER) {}
-        xiloader::console::output_to_channel("friend",
-            "QueueSm[%d]: state=%d ret=0x%X | pre: slot=%08X cnt=%u cur=%u | post: slot=%08X cnt=%u cur=%u",
-            s_queue_sm_log_count, state, r,
-            f208_pre, f218_pre, f214_pre,
-            f208_post, f218_post, f214_post);
-    }
-    return r;
-}
-
-/* dismiss_completion_callback (FFXi+0x1FFD60) hook. result=0 success, !=0 error. */
-typedef int (__cdecl* FnDismissCompletionCb)(uint32_t p1, uint32_t p2, int result);
-static FnDismissCompletionCb Real_DismissCompletionCb = nullptr;
-static int __cdecl Mine_DismissCompletionCb(uint32_t p1, uint32_t p2, int result)
-{
-    void* ret_ip = _ReturnAddress();
-    uint32_t ret_rva = s_ffxiBase ? (uint32_t)((uintptr_t)ret_ip - (uintptr_t)s_ffxiBase) : 0;
-    xiloader::console::output_to_channel("friend",
-        "DismissCompletionCb: result=%d (0x%X) caller=FFXi+0x%X p1=0x%X p2=0x%X",
-        result, result, ret_rva, p1, p2);
-    return Real_DismissCompletionCb ? Real_DismissCompletionCb(p1, p2, result) : 1;
-}
-
-/* dismiss_op2_handler (FFXi+0xF5590) hook. */
-typedef void (__cdecl* FnDismissOp2Handler)(int self, int state);
-static FnDismissOp2Handler Real_DismissOp2Handler = nullptr;
-static void __cdecl Mine_DismissOp2Handler(int self, int state)
-{
-    xiloader::console::output_to_channel("friend",
-        "DismissOp2Handler FIRES: this=0x%08X state=%d", self, state);
-    if (Real_DismissOp2Handler) Real_DismissOp2Handler(self, state);
-}
-
 /* FUN_04707570 hook -- friend conn teardown (clears DAT_04AEE900). */
 typedef uint8_t (__cdecl* FnFriendConnTeardown)(uint32_t arg);
 static FnFriendConnTeardown Real_FriendConnTeardown = nullptr;
@@ -2478,245 +1799,6 @@ static uint8_t __cdecl Mine_FriendConnTeardown(uint32_t arg)
     xiloader::console::output(xiloader::color::warning,
         "FriendConnTeardown returned %u, DAT_04AEE900 after=0x%08X", r, after);
     return r;
-}
-
-/* friend_dismiss_submit_outer (FFXi+0xF7430) hook. Conn-state check, then
- * forwards via FUN_047023F0 -> friend_op_table_submit_bodyfetch -> inner_send
- * with op_table FFXi+0x361278. */
-typedef uint32_t (__cdecl* FnDismissOuter)(uint32_t p1, uint32_t p2, uint32_t p3,
-                                            uint32_t p4, uint32_t cb, uint32_t op);
-static FnDismissOuter Real_DismissOuter = nullptr;
-static uint32_t __cdecl Mine_DismissOuter(uint32_t p1, uint32_t p2, uint32_t p3,
-                                           uint32_t p4, uint32_t cb, uint32_t op)
-{
-    uint32_t conn_state = 0;
-    if (s_ffxiBase != nullptr)
-        conn_state = *(uint32_t*)(s_ffxiBase + OFF_FRIEND_CONN_STATE);
-    xiloader::console::output_to_channel("friend",
-        "DismissOuter (friend_dismiss_submit_outer): p1=%08X p2=%08X p3=%08X p4=%08X cb=%08X "
-        "op_code=0x%X DAT_04AEE900=0x%08X",
-        p1, p2, p3, p4, cb, op, conn_state);
-    uint32_t r = Real_DismissOuter ? Real_DismissOuter(p1, p2, p3, p4, cb, op) : 2;
-    xiloader::console::output_to_channel("friend",
-        "DismissOuter returned %u (0x%X) %s",
-        r, r,
-        r == 0 ? "(QUEUED OK)" :
-        r == 2 ? "(CONN NULL BAIL)" :
-        "(INNER FAILURE)");
-    return r;
-}
-
-/* SEH-isolated reader for inbox row identity (sender first byte + ts).
- * Returns 1 on success, 0 on access violation. */
-static int safe_read_inbox_row_identity(uint32_t* source_struct,
-    uint8_t* out_sender_first, uint32_t* out_ts)
-{
-    __try {
-        uint32_t sender_ptr = source_struct[2];
-        uint32_t buf6 = source_struct[6];
-        *out_sender_first = (sender_ptr != 0) ? *(uint8_t*)(uintptr_t)sender_ptr : 0;
-        *out_ts = (buf6 != 0) ? *(uint32_t*)(uintptr_t)(buf6 + 0x34) : 0;
-        return 1;
-    }
-    __except (EXCEPTION_EXECUTE_HANDLER) {
-        return 0;
-    }
-}
-
-/* True if (sender_first, ts) was natively dismissed and should be suppressed.
- * Wraps the std::lock_guard outside any __try block to avoid C2712. */
-static bool is_row_dismissed(uint8_t sender_first, uint32_t ts)
-{
-    if (ts == 0) return false;
-    char tmp[2] = { (char)sender_first, '\0' };
-    uint64_t key = make_dismissed_key(tmp, ts);
-    std::lock_guard<std::mutex> lk(s_dismissed_mtx);
-    return s_dismissed_row_keys.count(key) != 0;
-}
-
-static int s_inbox_row_log_count = 0;
-static constexpr int INBOX_ROW_LOG_MAX = 25;
-static uint32_t __cdecl Mine_InboxRowCallback(int msg_obj, uint32_t icon_type,
-    uint32_t* output_or_sentinel, uint32_t arg4, uint32_t* source_struct)
-{
-    if (output_or_sentinel == nullptr && source_struct != nullptr
-        && s_inbox_row_log_count < INBOX_ROW_LOG_MAX)
-    {
-        s_inbox_row_log_count++;
-        /* Read 0x48B (18 dwords) of source_struct safely. */
-        auto safe_read = [](uint32_t* p, uint32_t* dst18) -> bool {
-            __try {
-                for (int i = 0; i < 18; i++) dst18[i] = p[i];
-                return true;
-            } __except (EXCEPTION_EXECUTE_HANDLER) {
-                return false;
-            }
-        };
-        uint32_t buf[18] = {};
-        bool ok = safe_read(source_struct, buf);
-
-        /* source_struct layout:
-         *   buf[0] = sub-menu vtable ptr (mes1rcv vs mes2frnd)
-         *   buf[2] = sender struct ptr (string at +0x0)
-         *   buf[3] = subject struct ptr
-         *   buf[4] = title text ptr
-         *   buf[5] = body text ptr
-         *   buf[6] = ptr to struct with timestamp at +0x34 */
-        char sender[24] = {};
-        char subject[24] = {};
-        char body[64] = {};
-        uint32_t timestamp = 0;
-        auto safe_str = [](uint32_t addr, char* dst, int max) {
-            if (addr == 0) return;
-            __try {
-                strncpy(dst, (const char*)(uintptr_t)addr, max - 1);
-                dst[max - 1] = 0;
-            } __except (EXCEPTION_EXECUTE_HANDLER) {
-                dst[0] = 0;
-            }
-        };
-        if (ok) {
-            safe_str(buf[2], sender, sizeof(sender));
-            safe_str(buf[3], subject, sizeof(subject));
-            safe_str(buf[5], body, sizeof(body));
-            __try { if (buf[6]) timestamp = *(uint32_t*)(uintptr_t)(buf[6] + 0x34); }
-            __except (EXCEPTION_EXECUTE_HANDLER) {}
-        }
-
-        xiloader::console::output(xiloader::color::warning,
-            "InboxRow[%d]: type=%u src=0x%08X submenu_vt=0x%08X "
-            "sender='%s' subj='%s' body='%s' ts=0x%08X",
-            s_inbox_row_log_count, icon_type, (uint32_t)(uintptr_t)source_struct,
-            buf[0], sender, subject, body, timestamp);
-
-        /* First row only: dump raw source_struct dwords [0..0xF] for shape. */
-        if (s_inbox_row_log_count == 1)
-        {
-            char hex[256] = {};
-            int n = 0;
-            for (int i = 0; i < 16 && n < 240; i++)
-                n += wsprintfA(hex + n, "%08X ", buf[i]);
-            xiloader::console::output(xiloader::color::warning,
-                "InboxRow[1] src raw: %s", hex);
-        }
-    }
-
-    if (Real_InboxRowCallback)
-        return Real_InboxRowCallback(msg_obj, icon_type, output_or_sentinel, arg4, source_struct);
-    return 0;
-}
-
-typedef bool (__cdecl* FnFriendErrorCB)(uint32_t a1, uint32_t a2, uint32_t result, uint32_t a4);
-static FnFriendErrorCB Real_FriendErrorCB = nullptr;
-static bool __cdecl Mine_FriendErrorCB(uint32_t a1, uint32_t a2, uint32_t result, uint32_t a4)
-{
-    void* ret_ip = _ReturnAddress();
-    uint32_t ret_rva = (uint32_t)((uintptr_t)ret_ip - (uintptr_t)s_ffxiBase);
-    xiloader::console::output_to_channel("friend",
-        "FriendErrorCB: a1=0x%08X a2=0x%08X result=%u (0x%X) a4=0x%08X ret=FFXi+0x%X",
-        a1, a2, result, result, a4, ret_rva);
-
-    /* Accept (a1=0x15) failed because polcore never actually sent. Helper
-     * avoids mixing C++ unwinding with SEH in the parent. */
-    if (a1 == 0x15 && result == 20)
-    {
-        auto try_read_sender = [](uint32_t addr, char* dst16) -> bool {
-            __try {
-                memcpy(dst16, (char*)(uintptr_t)addr, 15);
-                dst16[15] = 0;
-                return true;
-            } __except (EXCEPTION_EXECUTE_HANDLER) {
-                dst16[0] = 0;
-                return false;
-            }
-        };
-        char sender[16] = {};
-        uint32_t eh_ptr = *(uint32_t*)(s_ffxiBase + 0x62FF9C);
-        bool ok = (eh_ptr != 0) && try_read_sender(eh_ptr + 0x30, sender);
-        if (ok && sender[0] != 0)
-        {
-            xiloader::console::output(xiloader::color::warning,
-                "FriendErrorCB: accept(0x15) failed for '%s' -- polcore couldn't send. "
-                "Fix should be on the polcore-native side, not a hijack.", sender);
-        }
-    }
-
-    if (Real_FriendErrorCB)
-        return Real_FriendErrorCB(a1, a2, result, a4);
-    return false;
-}
-
-/* Friend-system submit hook (FUN_0480F550). */
-typedef void (__thiscall* FnFriendSubmit)(void* chat_obj, void* src, unsigned char flag);
-static FnFriendSubmit Real_FriendSubmit = nullptr;
-static void __fastcall Mine_FriendSubmit(void* chat_obj, void* /*edx*/,
-                                         void* src, unsigned char flag)
-{
-    if (src)
-    {
-        const uint8_t* s = (const uint8_t*)src;
-        char hex[256] = {};
-        char ascii[80] = {};
-        int hp = 0, ap = 0;
-        for (int i = 0; i < 72 && hp < (int)sizeof(hex)-3; i++)
-        {
-            hp += _snprintf_s(hex+hp, sizeof(hex)-hp, _TRUNCATE, "%02x ", s[i]);
-            if (ap < (int)sizeof(ascii)-1)
-                ascii[ap++] = (s[i] >= 32 && s[i] < 127) ? (char)s[i] : '.';
-        }
-        ascii[ap] = '\0';
-        xiloader::console::output_to_channel("friend",
-            "FriendSubmit: chat=0x%08X flag=0x%02X src ascii='%s'",
-            (uint32_t)(uintptr_t)chat_obj, flag, ascii);
-        xiloader::console::output_to_channel("friend",
-            "  src hex: %s", hex);
-    }
-    else
-    {
-        xiloader::console::output(xiloader::color::warning,
-            "FriendSubmit: src=NULL chat=0x%08X flag=0x%02X",
-            (uint32_t)(uintptr_t)chat_obj, flag);
-    }
-    if (Real_FriendSubmit)
-        Real_FriendSubmit(chat_obj, src, flag);
-}
-
-/* Body display hook (FFXi+0x1FFB20). __thiscall on chat_obj, 5 args.
- * Called by dispatcher +0x2000B0 sub_type 1 when Enter activates a message.
- * Args: max_items, rendered_count, visible_count, selected, type_str_table_ptr. */
-typedef int (__thiscall* FnBodyDisplay)(void* chat_obj, int max_items,
-                                        int rendered_count, int visible_count,
-                                        int selected, void* type_str_table);
-static FnBodyDisplay Real_BodyDisplay = nullptr;
-static int __fastcall Mine_BodyDisplay(void* chat_obj, void* /*edx*/,
-                                       int max_items, int rendered_count,
-                                       int visible_count, int selected,
-                                       void* type_str_table)
-{
-    xiloader::console::output_to_channel("friend",
-        "BodyDisplay: chat=0x%08X max=%d rendered=%d visible=%d sel=%d type_tbl=0x%08X",
-        (uint32_t)(uintptr_t)chat_obj, max_items, rendered_count, visible_count,
-        selected, (uint32_t)(uintptr_t)type_str_table);
-    if (Real_BodyDisplay)
-        return Real_BodyDisplay(chat_obj, max_items, rendered_count,
-                                visible_count, selected, type_str_table);
-    return 0;
-}
-
-/* Scroll-list callback registrar hook (FFXi+0xF7490). Invoked by FFXi+0x2008A0.
- * Args observed: (scroll_list, callback_fn, sub_object, msg_obj). */
-typedef uint32_t (__cdecl* FnRegisterScrollCB)(uint32_t a1, uint32_t a2,
-                                               uint32_t a3, uint32_t a4);
-static FnRegisterScrollCB Real_RegisterScrollCB = nullptr;
-static uint32_t __cdecl Mine_RegisterScrollCB(uint32_t a1, uint32_t a2,
-                                              uint32_t a3, uint32_t a4)
-{
-    xiloader::console::output_to_channel("friend",
-        "RegScrollCB: a1=0x%08X a2=0x%08X a3=0x%08X a4=0x%08X",
-        a1, a2, a3, a4);
-    if (Real_RegisterScrollCB)
-        return Real_RegisterScrollCB(a1, a2, a3, a4);
-    return 0;
 }
 
 /* Signature-based offset resolution. Finds anchor functions by unique byte
@@ -5622,7 +4704,7 @@ static void build_msg_filename_data(uint8_t* out72, const NotifMessage& nm,
     strncpy((char*)(out72 + 0x10), nm.sender, 15);
     strncpy((char*)(out72 + 0x20), nm.subject, 15);
     *(uint32_t*)(out72 + 0x30) = nm.msg_type;
-    *(uint32_t*)(out72 + 0x34) = (uint32_t)time(NULL);
+    *(uint32_t*)(out72 + 0x34) = nm.timestamp ? nm.timestamp : (uint32_t)time(NULL);
     *(uint32_t*)(out72 + 0x38) = body_size;       /* polcore body parser walk limit */
 
     /* +0x3E ushort: bits 7-11 = icon-type, bit 15 = always-on valid flag. */
@@ -5660,7 +4742,16 @@ static std::string get_local_msg_dir()
     slash = dir.find_last_of("\\/");
     if (slash != std::string::npos)
         dir = dir.substr(0, slash);
-    return dir + "\\msg";
+
+    /* Must match main.cpp EnsureMsgDir exactly. The file-API hooks pass an
+     * already-qualified path through unchanged, so a path built without the
+     * account segment gets the segment appended a second time. */
+    char acct[32] = {};
+    if (globals::g_AccountId != 0)
+        wsprintfA(acct, "%u", globals::g_AccountId);
+    else
+        strcpy_s(acct, "_no_accid");
+    return dir + "\\msg\\" + acct;
 }
 
 /* Write a message body file under msg\r\b\. Captures the encoded filename
@@ -5682,20 +4773,26 @@ static bool write_msg_file(NotifMessage& nm)
     body += (char)0;
     uint32_t body_size = (uint32_t)body.size();
 
-    /* Capture timestamp here so nm.timestamp matches the on-disk filename's
-     * +0x34 (build_msg_filename_data calls time(NULL) internally and could
-     * differ from this snapshot by 1 second). */
-    nm.timestamp = (uint32_t)time(NULL);
+    /* The server created_at, never time(NULL): this value is encoded into
+     * the filename at +0x34, so a wall-clock stamp renames the same
+     * message every login and defeats both existence checks below. */
+    if (nm.timestamp == 0)
+        nm.timestamp = (uint32_t)time(NULL);
 
     uint8_t fndata[72];
     build_msg_filename_data(fndata, nm, body_size);
-    *(uint32_t*)(fndata + 0x34) = nm.timestamp;
     std::string filename = encode_msg_filename(fndata);
     strncpy(nm.filename, filename.c_str(), sizeof(nm.filename) - 1);
     nm.filename[sizeof(nm.filename) - 1] = '\0';
 
-    std::string dir = get_local_msg_dir() + "\\r\\b";
+    std::string root = get_local_msg_dir();
+    std::string dir  = root + "\\r\\b";
     std::string path = dir + "\\" + filename;
+
+    /* Read messages live in r\a. Nothing tells the server a message was
+     * read, so rewriting one into r\b resurrects it unread every login. */
+    if (GetFileAttributesA((root + "\\r\\a\\" + filename).c_str()) != INVALID_FILE_ATTRIBUTES)
+        return false;
 
     if (GetFileAttributesA(path.c_str()) != INVALID_FILE_ATTRIBUTES)
         return true;
@@ -5807,8 +4904,9 @@ static void write_notification_files()
         {
             NotifMessage nm = s_notif_queue.front();
             s_notif_queue.pop();
-            if (write_msg_file(nm))
-                written++;
+            if (!write_msg_file(nm))
+                continue;
+            written++;
             if ((int)s_cached_messages.size() < MAX_CACHED_MESSAGES)
                 s_cached_messages.push_back(nm);
         }
@@ -5859,11 +4957,6 @@ static void write_notification_files()
         }
     }
 }
-
-/* FFXiMain message_insert: __cdecl(msg_obj*, icon_type, mode, unk, source*)
- * at mid-function entry +0x1FF010, 5 stack args. */
-typedef bool (__cdecl* FnMessageInsert)(void* msg_obj, int icon_type, int mode, int unk, void* source);
-typedef void (__thiscall* FnVt1)(void* msg_obj);
 
 static constexpr uint32_t OFF_MSG_VTABLE = 0x33AC28;  /* set by constructor at +0x2006E0 */
 
@@ -6003,266 +5096,6 @@ static bool ensure_native_msg_obj()
 }
 
 static bool init_callerC_slot();
-
-/* Start CallerC as a notification pump (not befriend). Pumping CallerC
- * through native polcore creates msg_obj as a side effect. */
-static void try_start_callerC_notification()
-{
-    if (s_callerC_active || s_polBase == nullptr)
-        return;
-
-    if (!init_callerC_slot())
-        return;
-
-    s_callerC_is_notification = true;
-    xiloader::console::output_to_channel("friend",
-        "FriendSys: CallerC slot %d (notification pump to trigger msg_obj creation)",
-        s_callerC_slot);
-}
-
-/* Icon type string table at FFXiMain+0x383088 (13 entries, 8B each):
- * 0=[NRM], 1=[FWT], 2=[OTR], 3=[KNK], 9=[FOK], 10=[FNO]. */
-static const char* get_icon_label(int icon_type)
-{
-    switch (icon_type) {
-        case 0:  return "[NRM]";
-        case 1:  return "[FWT]";
-        case 3:  return "[KNK]";
-        case 9:  return "[FOK]";
-        case 10: return "[FNO]";
-        default: return "[OTR]";
-    }
-}
-
-/* Click-to-read: scan msg_obj (+0x00..+0x7C) and ui_element (+0x00..+0x3C)
- * each tick for state transitions. */
-static constexpr int MON_OBJ_WORDS = 32;  /* 0x80 bytes */
-static constexpr int MON_UI_WORDS  = 16;  /* 0x40 bytes */
-static uint32_t s_mon_obj[MON_OBJ_WORDS] = {};
-static uint32_t s_mon_ui[MON_UI_WORDS] = {};
-static bool s_mon_init = false;
-static uint32_t s_mon_ui_ptr = 0;
-
-static void monitor_msg_obj_clicks()
-{
-    if (!s_native_msg_init || s_ffxiBase == nullptr)
-        return;
-
-    uint32_t native_ptr = *(uint32_t*)(s_ffxiBase + OFF_MSG_OBJ_NATIVE);
-    if (native_ptr == 0) return;
-
-    uint8_t* obj = (uint8_t*)(uintptr_t)native_ptr;
-
-    uint32_t cur_obj[MON_OBJ_WORDS];
-    for (int i = 0; i < MON_OBJ_WORDS; i++)
-        cur_obj[i] = *(uint32_t*)(obj + i * 4);
-
-    uint32_t ui_ptr = *(uint32_t*)(obj + 0x08);
-    uint32_t cur_ui[MON_UI_WORDS] = {};
-    bool ui_valid = (ui_ptr != 0);
-    if (ui_valid)
-    {
-        __try { for (int i = 0; i < MON_UI_WORDS; i++) cur_ui[i] = *(uint32_t*)((uint8_t*)(uintptr_t)ui_ptr + i * 4); }
-        __except(EXCEPTION_EXECUTE_HANDLER) { ui_valid = false; }
-    }
-
-    if (!s_mon_init)
-    {
-        memcpy(s_mon_obj, cur_obj, sizeof(cur_obj));
-        if (ui_valid) { memcpy(s_mon_ui, cur_ui, sizeof(cur_ui)); s_mon_ui_ptr = ui_ptr; }
-        s_mon_init = true;
-        return;
-    }
-
-    for (int i = 0; i < MON_OBJ_WORDS; i++)
-    {
-        if (cur_obj[i] != s_mon_obj[i])
-        {
-            xiloader::console::output(xiloader::color::warning,
-                "MsgMon: obj+0x%02X: 0x%08X -> 0x%08X", i * 4, s_mon_obj[i], cur_obj[i]);
-            s_mon_obj[i] = cur_obj[i];
-        }
-    }
-
-    if (ui_valid && s_mon_ui_ptr == ui_ptr)
-    {
-        for (int i = 0; i < MON_UI_WORDS; i++)
-        {
-            if (cur_ui[i] != s_mon_ui[i])
-            {
-                xiloader::console::output(xiloader::color::warning,
-                    "MsgMon: ui+0x%02X: 0x%08X -> 0x%08X", i * 4, s_mon_ui[i], cur_ui[i]);
-                s_mon_ui[i] = cur_ui[i];
-            }
-        }
-    }
-    else if (ui_valid && s_mon_ui_ptr != ui_ptr)
-    {
-        memcpy(s_mon_ui, cur_ui, sizeof(cur_ui));
-        s_mon_ui_ptr = ui_ptr;
-    }
-
-    /* Register the Enter/activation callback for the Messages scroll list.
-     * FFXi+0x2008A0 checks rebuild flag, gets scroll list via +0x200140,
-     * registers MsgProcess (+0x200910) via +0x0F7490. Required while the
-     * Messages tab is open (ui_element at +0x08 exists). Re-register each
-     * tab reopen -- scroll list is recreated. */
-    static constexpr uint32_t OFF_REGISTER_CALLBACK = 0x2008A0;
-    static uint32_t s_last_registered_ui = 0;
-
-    if (ui_ptr != 0 && ui_ptr != s_last_registered_ui && s_ffxiBase != nullptr)
-    {
-        uint32_t native_ptr = *(uint32_t*)(s_ffxiBase + OFF_MSG_OBJ_NATIVE);
-        if (native_ptr != 0)
-        {
-            /* Clear rebuild flag (function bails if set). */
-            *(uint8_t*)(s_ffxiBase + 0x62FFA0) = 0;
-
-            /* Patch vis bytes to prevent auto-open: registerCB internally
-             * triggers show_menu via downstream calls. */
-            uint8_t* rv1 = s_ffxiBase + 0x200789;
-            uint8_t* rv2 = s_ffxiBase + 0x2007A5;
-            DWORD rvp1 = 0, rvp2 = 0;
-            VirtualProtect(rv1, 1, PAGE_EXECUTE_READWRITE, &rvp1);
-            uint8_t ro1 = *rv1; *rv1 = 0x00;
-            VirtualProtect(rv2, 1, PAGE_EXECUTE_READWRITE, &rvp2);
-            uint8_t ro2 = *rv2; *rv2 = 0x00;
-
-            typedef bool (__thiscall* FnRegisterCB)(void*, int);
-            FnRegisterCB registerCB = (FnRegisterCB)(s_ffxiBase + OFF_REGISTER_CALLBACK);
-
-            __try
-            {
-                registerCB((void*)(uintptr_t)native_ptr, 0);
-                s_last_registered_ui = ui_ptr;
-
-                /* MsgProcess + FUN_0480FC90 diagnostic passthrough hooks. */
-                static bool s_hook_installed = false;
-                if (!s_hook_installed)
-                {
-                    Real_MsgProcess = (FnMsgProcess)(s_ffxiBase + OFF_MSG_PROCESS);
-                    Real_FC90       = (FnFC90)(s_ffxiBase + OFF_FC90);
-                    DetourTransactionBegin();
-                    DetourUpdateThread(GetCurrentThread());
-                    DetourAttach(&(PVOID&)Real_MsgProcess, (PVOID)Mine_MsgProcess);
-                    DetourAttach(&(PVOID&)Real_FC90,       (PVOID)Mine_FC90);
-                    if (DetourTransactionCommit() == NO_ERROR)
-                    {
-                        s_hook_installed = true;
-                        xiloader::console::output_to_channel("friend",
-                            "FriendSys: MsgProcess + FC90 diagnostic hooks installed");
-                    }
-                }
-
-                /* Hook the friend-system submit pipeline. */
-                static bool s_friend_submit_hook = false;
-                if (!s_friend_submit_hook)
-                {
-                    Real_FriendSubmit  = (FnFriendSubmit)(s_ffxiBase + OFF_FRIEND_SUBMIT);
-                    Real_FriendSend    = (FnFriendSend)(s_ffxiBase + OFF_FRIEND_SEND);
-                    Real_ShowError     = (FnShowError)(s_ffxiBase + OFF_SHOW_ERROR);
-                    Real_ChatWrapper   = (FnChatWrapper)(s_ffxiBase + OFF_CHAT_WRAPPER);
-                    Real_FriendErrorCB = (FnFriendErrorCB)(s_ffxiBase + OFF_FRIEND_ERR_CB);
-                    Real_RealSend      = (FnRealSend)(s_ffxiBase + OFF_FRIEND_REAL_SEND);
-                    Real_InnerSend     = (FnInnerSend)(s_ffxiBase + OFF_FRIEND_INNER_SEND);
-                    Real_PolPumpGate   = (FnPolPumpGate)(s_polBase + OFF_POL_PUMP_GATE);
-                    Real_PolSlotAlloc  = (FnPolSlotAlloc)(s_polBase + OFF_POL_SLOT_ALLOC);
-                    Real_PolRegistrar  = (FnPolRegistrar)(s_polBase + OFF_POL_REGISTRAR);
-                    Real_PolBodyFetchDriver = (FnPolBodyFetchDriver)(s_polBase + OFF_POL_BODY_FETCH_DRIVER);
-                    Real_PolCallerCInit     = (FnPolCallerCInit)(s_polBase + OFF_POL_CALLERC_INIT);
-                    Real_PolBefriendDriver  = (FnPolBefriendDriver)(s_polBase + OFF_POL_BEFRIEND_DRIVER);
-                    /* BefriendOuter, BefriendInner, BefriendHandler,
-                     * ChatDispatcher: now installed at STATE_READY entry instead. */
-                    Real_PolNotifCBReg = (FnPolNotifCBReg)(s_polBase + OFF_POL_NOTIF_CB_REG);
-                    Real_PolNotifEnqueue = (FnPolNotifEnqueue)(s_polBase + OFF_POL_NOTIF_ENQUEUE);
-                    Real_PolSlotTeardown = (FnPolSlotTeardown)(s_polBase + OFF_POL_SLOT_TEARDOWN);
-                    Real_AcceptPoll      = (FnAcceptPoll)(s_ffxiBase + OFF_FFXI_ACCEPT_POLL);
-                    Real_FriendInserter  = (FnFriendInserter)(s_polBase + OFF_POL_FRIEND_INSERTER);
-                    Real_BitmapOp        = (FnBitmapOp)(s_polBase + OFF_POL_BITMAP_OP);
-
-                    /* Snapshot the current notification callback ptr to see
-                     * whether FFXi registered one before this hook installs. */
-                    {
-                        uint32_t cb_now = *(uint32_t*)(s_polBase + OFF_POL_NOTIF_CB_PTR);
-                        xiloader::console::output_to_channel("friend",
-                            "PolNotifCB: pre-hook DAT_0462A974 = 0x%08X (%s)",
-                            cb_now, cb_now == 0 ? "UNREGISTERED" : "registered");
-                    }
-                    Real_InboxRowCallback = (FnInboxRowCallback)(s_ffxiBase + OFF_INBOX_ROW_CALLBACK);
-                    Real_DismissSubmit  = (FnDismissSubmit)(s_ffxiBase + OFF_DISMISS_SUBMIT);
-                    Real_MsgDismissAction = (FnMsgDismissAction)(s_ffxiBase + OFF_MSG_DISMISS_ACTION);
-                    Real_DismissOuter   = (FnDismissOuter)(s_ffxiBase + OFF_DISMISS_OUTER);
-                    Real_FriendSysInit  = (FnFriendSysInit)(s_ffxiBase + OFF_FRIEND_SYS_INIT);
-                    Real_FriendInitWrap = (FnFriendInitWrap)(s_ffxiBase + OFF_FRIEND_INIT_WRAP);
-                    Real_DismissOp1Send = (FnDismissOp1Send)(s_ffxiBase + OFF_DISMISS_OP1_SEND);
-                    Real_QueueSmDriver  = (FnQueueSmDriver)(s_ffxiBase + OFF_POLCORE_QUEUE_SM_DRIVER);
-                    Real_DismissCompletionCb = (FnDismissCompletionCb)(s_ffxiBase + OFF_DISMISS_COMPLETION_CB);
-                    Real_DismissOp2Handler = (FnDismissOp2Handler)(s_ffxiBase + OFF_DISMISS_OP2_HANDLER);
-                    Real_PolFilenameDecoder = (FnPolFilenameDecoder)(s_polBase + OFF_POL_FILENAME_DECODER);
-                    /* FriendConnInit/Teardown are attached earlier (STATE_READY)
-                     * to catch boot-time init/teardown; do not re-attach. */
-                    DetourTransactionBegin();
-                    DetourUpdateThread(GetCurrentThread());
-                    DetourAttach(&(PVOID&)Real_FriendSubmit,  (PVOID)Mine_FriendSubmit);
-                    DetourAttach(&(PVOID&)Real_FriendSend,    (PVOID)Mine_FriendSend);
-                    DetourAttach(&(PVOID&)Real_ShowError,     (PVOID)Mine_ShowError);
-                    DetourAttach(&(PVOID&)Real_ChatWrapper,   (PVOID)Mine_ChatWrapper);
-                    DetourAttach(&(PVOID&)Real_FriendErrorCB, (PVOID)Mine_FriendErrorCB);
-                    DetourAttach(&(PVOID&)Real_RealSend,      (PVOID)Mine_RealSend);
-                    DetourAttach(&(PVOID&)Real_InnerSend,     (PVOID)Mine_InnerSend);
-                    DetourAttach(&(PVOID&)Real_PolPumpGate,   (PVOID)Mine_PolPumpGate);
-                    DetourAttach(&(PVOID&)Real_PolSlotAlloc,  (PVOID)Mine_PolSlotAlloc);
-                    DetourAttach(&(PVOID&)Real_PolRegistrar,  (PVOID)Mine_PolRegistrar);
-                    DetourAttach(&(PVOID&)Real_PolBodyFetchDriver, (PVOID)Mine_PolBodyFetchDriver);
-                    DetourAttach(&(PVOID&)Real_PolCallerCInit,    (PVOID)Mine_PolCallerCInit);
-                    DetourAttach(&(PVOID&)Real_PolBefriendDriver, (PVOID)Mine_PolBefriendDriver);
-                    /* BefriendOuter/Inner/Handler, ChatDispatcher
-                     * are attached earlier at STATE_READY entry. */
-                    DetourAttach(&(PVOID&)Real_PolNotifCBReg, (PVOID)Mine_PolNotifCBReg);
-                    DetourAttach(&(PVOID&)Real_PolNotifEnqueue, (PVOID)Mine_PolNotifEnqueue);
-                    DetourAttach(&(PVOID&)Real_PolSlotTeardown, (PVOID)Mine_PolSlotTeardown);
-                    DetourAttach(&(PVOID&)Real_AcceptPoll,      (PVOID)Mine_AcceptPoll);
-                    DetourAttach(&(PVOID&)Real_FriendInserter,  (PVOID)Mine_FriendInserter);
-                    DetourAttach(&(PVOID&)Real_BitmapOp,        (PVOID)Mine_BitmapOp);
-                    DetourAttach(&(PVOID&)Real_InboxRowCallback, (PVOID)Mine_InboxRowCallback);
-                    DetourAttach(&(PVOID&)Real_DismissSubmit, (PVOID)Mine_DismissSubmit);
-                    DetourAttach(&(PVOID&)Real_MsgDismissAction, (PVOID)Mine_MsgDismissAction);
-                    DetourAttach(&(PVOID&)Real_DismissOuter, (PVOID)Mine_DismissOuter);
-                    DetourAttach(&(PVOID&)Real_FriendSysInit,  (PVOID)Mine_FriendSysInit);
-                    DetourAttach(&(PVOID&)Real_FriendInitWrap, (PVOID)Mine_FriendInitWrap);
-                    DetourAttach(&(PVOID&)Real_DismissOp1Send, (PVOID)Mine_DismissOp1Send);
-                    DetourAttach(&(PVOID&)Real_QueueSmDriver,  (PVOID)Mine_QueueSmDriver);
-                    DetourAttach(&(PVOID&)Real_DismissCompletionCb, (PVOID)Mine_DismissCompletionCb);
-                    DetourAttach(&(PVOID&)Real_DismissOp2Handler, (PVOID)Mine_DismissOp2Handler);
-                    DetourAttach(&(PVOID&)Real_PolFilenameDecoder, (PVOID)Mine_PolFilenameDecoder);
-                    for (int i = 0; i < 8; i++)
-                    {
-                        s_accept_op_hooks[i].real =
-                            (void*)(s_ffxiBase + s_accept_op_hooks[i].rva);
-                        DetourAttach(&s_accept_op_hooks[i].real, s_accept_op_mine[i]);
-                    }
-                    if (DetourTransactionCommit() == NO_ERROR)
-                    {
-                        s_friend_submit_hook = true;
-                        xiloader::console::output_to_channel("friend",
-                            "FriendSys: friend hooks installed");
-                    }
-                }
-
-                xiloader::console::output_to_channel("friend",
-                    "FriendSys: Enter callback registered (ui=0x%08X)", ui_ptr);
-            }
-            __except(EXCEPTION_EXECUTE_HANDLER)
-            {
-                xiloader::console::output(xiloader::color::error,
-                    "FriendSys: register callback crashed (0x%08X)", GetExceptionCode());
-            }
-
-            *rv1 = ro1; VirtualProtect(rv1, 1, rvp1, &rvp1);
-            *rv2 = ro2; VirtualProtect(rv2, 1, rvp2, &rvp2);
-        }
-    }
-}
 
 typedef int  (__cdecl* FnCallerCInit)();
 typedef int  (__cdecl* FnGenericDriver)(int slot);
@@ -7126,9 +5959,6 @@ static void pump_friend_status()
         s_friend_status_active = false;
     }
 }
-
-/* Notification overlay R: counter -- re-injects only on count change. */
-static int s_overlay_scan_cooldown       = 0;
 static int s_overlay_last_notified_count = 0;
 
 void friend_system::init()

@@ -228,7 +228,7 @@ Multiple submit paths land in different state machines, each with its own op-cod
 
 Both SM pointers `0x0497129C` and `0x04971278` resolve to the same function `friend_op_state_dispatcher (FFXi+0x704400)` -- a tiny switch returning phase codes (0x16=init-done, 0x17=increment-counter, 0x15/6/0=other). The actual network send happens in the per-frame driver which reads `state[+0x105C]` (SM ptr), invokes the SM fn for the next phase, and dispatches the registered callback when the response arrives.
 
-`DAT_04AEE900` is the friend-system manager struct pointer. `+0x0A` = current inbox row count (clamped to 200). Populated by the network response deserializer (writers at `friend_resp_write_a (FFXi+0x707570)` and `friend_resp_write_b (FFXi+0x701AE0)`).
+`DAT_04AEF908` is the friend-system manager struct pointer. `+0x0A` = current inbox row count (clamped to 200). Populated by the network response deserializer (writers at `friend_resp_write_a (FFXi+0x707570)` and `friend_resp_write_b (FFXi+0x701AE0)`).
 
 ### Per-frame friend driver -- `friend_per_frame (FFXi+0x102B20)`
 

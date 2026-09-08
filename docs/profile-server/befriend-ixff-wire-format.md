@@ -106,7 +106,7 @@ The chain past `befriend_submit`:
 
 ```
 friend_op_send_check_conn @ 0x04707520
-    if DAT_04AEE900 == 0 -> return 2 (no friend connection object)
+    if DAT_04AEF908 == 0 -> return 2 (no friend connection object)
     -> friend_op_increment_seq @ 0x04702350
         if [conn+0x20] == 0 -> return 0x10 (op slot pool not allocated)
         slot.seq16++; if seq16 == 0 -> seq16 = 1
@@ -125,7 +125,7 @@ friend_op_send_check_conn @ 0x04707520
                   slot from here, returns 0 from inner_send
 ```
 
-`DAT_04AEE900` (FFXi `0x4DE900`) is the friend connection object, lazily
+`DAT_04AEF908` (FFXi `0x4DF908`) is the friend connection object, lazily
 allocated by `FUN_04707550`. It owns two op-slot buffers (0x1060 bytes each)
 allocated at `[conn+0x20]` and `[conn+0x24]`.
 

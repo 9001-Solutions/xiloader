@@ -282,9 +282,9 @@ static uint32_t OFF_MSG_DISMISS_ACTION = 0x1FFFE0;
 /* DAT_04AEE900 (FFXi RVA 0x4DE900) -- friend connection state pointer. NULL
  * causes FUN_04707150 / 04707310 / 04707350 to early-return 2. Resolved at
  * runtime from FRIEND_CONN_TEARDOWN's first instruction imm32. */
-static uint32_t OFF_FRIEND_CONN_STATE  = 0x4DE900;
+static uint32_t OFF_FRIEND_CONN_STATE  = 0x4DF908;
 
-static uint32_t OFF_MSG_OBJ_NATIVE = 0x62FF94;   /* native msg_obj global */
+static uint32_t OFF_MSG_OBJ_NATIVE = 0x630F9C;   /* native msg_obj global */
 /* Store 3 container pointer. Resolved at runtime from the entry accessor
  * (see resolve_ffximain_offsets); the old hardcoded 0x4DD600 reads NULL on
  * builds after 2026-07, which silently disabled do_sync_status entirely. */
@@ -309,13 +309,9 @@ static uint32_t OFF_FULL_INIT_VIS2  = 0x200824;
  * a pointer to a resource handle table. Initialized once at engine startup
  * by FUN_047D8480 via FUN_047E0CF0 (the global menu init). flistmai_menu_open
  * indexes RES[1] (windowps), RES[2] (keytops3), RES[5] (menu/contents). */
-static constexpr uint32_t OFF_RES_TABLE       = 0x62F328;
 /* DAT_04990FA0 -- short[9], indices into RES[2]->table for flistmai+0x68..+0x88 */
-static constexpr uint32_t OFF_KEYTOPS_IDX_9   = 0x380FA0;
 /* DAT_04990FC4 -- short[5], indices into RES[1]->table for flistmai+0x90..+0xA0 */
-static constexpr uint32_t OFF_WINDOWPS_IDX_5  = 0x380FC4;
 /* DAT_04990F90 -- short[7], column x-offsets, pointer stored at flistmai+0x30 */
-static constexpr uint32_t OFF_COL_OFFSETS     = 0x380F90;
 static uint32_t OFF_DISPLAY_CB    = 0xF2750;
 /* Same address as OFF_FRIEND_CONN_STATE -- resolved via the teardown anchor. */
 #define OFF_NOTIF_MGR_PTR OFF_FRIEND_CONN_STATE
@@ -346,7 +342,7 @@ static uint32_t OFF_FFXI_CHAR_RECORD_INIT = 0xF9D50;
  * msg file. __thiscall(msg_obj, a2, a3, a4) where a2/a3/a4 mirror
  * msg_obj+0x58/+0x5C/+0x60. */
 static uint32_t OFF_INBOX_ENUM_FN     = 0x2002F0;  /* resolved at runtime */
-static uint32_t OFF_INBOX_INIT_DONE   = 0x62FFA0;
+static uint32_t OFF_INBOX_INIT_DONE   = 0x630FA8;
 typedef bool (__thiscall* FnInboxEnum)(void* msg_obj, uint32_t a2, uint32_t a3, uint32_t a4);
 
 /* SEH-isolated thunk: __try cannot live in a function with C++ object
@@ -367,9 +363,6 @@ static int call_inbox_enum_seh(uint8_t* ffxiBase, void* msg_obj,
     }
 }
 
-static constexpr uint32_t OFF_TYPE5_CHECK = 0x0E751D;
-static constexpr uint32_t OFF_POP_CHECK1  = 0x1E9A0F;
-static constexpr uint32_t OFF_POP_CHECK2  = 0x1E9A1C;
 
 /* Timing constants (1 tick = ~16ms, ~60 ticks/sec) */
 static constexpr int KEEPALIVE_TICKS    = 1800;
@@ -1758,6 +1751,8 @@ static bool resolve_polcore_offsets(uint8_t* base)
     return all_ok;
 }
 
+static uint32_t OFF_MSG_VTABLE = 0x33AC28;  /* set by constructor at +0x2006E0 */
+
 /* FFXiMain offsets -- resolved at runtime via signature scanning. Mirrors
  * resolve_polcore_offsets pattern: each block finds an anchor, optionally
  * walks back for a function prologue, and updates the OFF_* constant.
@@ -2049,7 +2044,72 @@ static bool resolve_ffximain_offsets(uint8_t* base)
         }
     }
 
-    bool all_ok = ok_populate &&
+    /* friend_conn_teardown: `MOV ECX,[FRIEND_CONN_STATE]; TEST ECX,ECX; JZ +0x1F;
+     * PUSH EBX; MOV EBX,[ESP+8]; PUSH EBX; CALL`. The imm32 at +2 is the
+     * absolute address of the friend connection state pointer. */
+    bool ok_conn_state = false;
+    {
+        DWORD td = friend_scan::FindPattern(mod,
+            (const unsigned char*)"\x8B\x0D\x00\x00\x00\x00\x85\xC9\x74\x1F\x53"
+                                  "\x8B\x5C\x24\x08\x53\xE8",
+            "xx????xxxxxxxxxxx");
+        if (td)
+        {
+            OFF_FRIEND_CONN_STATE = *(uint32_t*)(td + 2) - baseAddr;
+            ok_conn_state = true;
+            resolved++;
+        }
+        else
+        {
+            xiloader::console::output(xiloader::color::error,
+                "FriendSys: friend_conn_state anchor FAILED to resolve");
+        }
+    }
+
+    /* inbox_row_callback prologue: `PUSH ECX; MOV EAX,[MSG_OBJ]; MOV BYTE
+     * [INBOX_INIT_DONE],0; PUSH ESI; MOV ECX,[EAX+8]; TEST ECX,ECX`. The two
+     * imm32s at +2 and +8 are the message object and the inbox-init flag. */
+    bool ok_inbox_globals = false;
+    {
+        DWORD ir = friend_scan::FindPattern(mod,
+            (const unsigned char*)"\x51\xA1\x00\x00\x00\x00\xC6\x05\x00\x00\x00\x00\x00"
+                                  "\x56\x8B\x48\x08\x85\xC9",
+            "xx????xx?????xxxxxx");
+        if (ir)
+        {
+            OFF_MSG_OBJ_NATIVE  = *(uint32_t*)(ir + 2) - baseAddr;
+            OFF_INBOX_INIT_DONE = *(uint32_t*)(ir + 8) - baseAddr;
+            ok_inbox_globals = true;
+            resolved += 2;
+        }
+        else
+        {
+            xiloader::console::output(xiloader::color::error,
+                "FriendSys: inbox globals anchor FAILED to resolve");
+        }
+    }
+
+    /* Message-object constructor: `MOV [ESI],vtable; MOV [ESI+0x50],-1`. The
+     * imm32 at +2 is the vtable ensure_native_msg_obj validates against. */
+    bool ok_msg_vtable = false;
+    {
+        DWORD vt = friend_scan::FindPattern(mod,
+            (const unsigned char*)"\xC7\x06\x00\x00\x00\x00\xC7\x46\x50\xFF\xFF\xFF\xFF",
+            "xx????xxxxxxx");
+        if (vt)
+        {
+            OFF_MSG_VTABLE = *(uint32_t*)(vt + 2) - baseAddr;
+            ok_msg_vtable = true;
+            resolved++;
+        }
+        else
+        {
+            xiloader::console::output(xiloader::color::error,
+                "FriendSys: msg vtable anchor FAILED to resolve");
+        }
+    }
+
+    bool all_ok = ok_conn_state && ok_inbox_globals && ok_msg_vtable && ok_populate &&
                   ok_char_init && ok_inbox_enum && ok_flistmai && ok_dismiss_action &&
                   ok_friend_submit && ok_display_cb && ok_full_init && ok_store3;
     xiloader::console::output(all_ok ? xiloader::color::success : xiloader::color::warning,
@@ -2063,15 +2123,6 @@ typedef int  (__cdecl*    FnEnrich)(int a2i, void* entry);
 typedef void (__thiscall* FnPopulate)(void* flistmai, int param);
 typedef void (__thiscall* FnAddNotification)(void* manager, void* buf48);
 
-static void nop_bytes(uint8_t* addr, int count)
-{
-    DWORD old;
-    if (VirtualProtect(addr, count, PAGE_EXECUTE_READWRITE, &old))
-    {
-        memset(addr, 0x90, count);
-        VirtualProtect(addr, count, old, &old);
-    }
-}
 
 static bool s_notif_overlay_applied = false;
 static uint32_t s_notif_cb_expected = 0;
@@ -2318,132 +2369,7 @@ static int compute_backoff_ticks(int failures)
     return backoff;
 }
 
-/* Replicates the SETUP portion of native flistmai_menu_open (FFXi+0x1EB190)
- * without the UI-thread mutations (FUN_047FB290 + visual menu opens). After
- * this runs, flistmai's color/font/layout fields are valid, populate can be
- * called, and the engine's per-frame draw won't deref NULL handles.
- *
- * Native flistmai_menu_open does:
- *   A) FUN_047FB290        -- UI-mgr "node ready" (SKIP -- touches UI-mgr open list)
- *   B) RES[2] loop -> flistmai+0x68..+0x88     (SETUP -- keytops3 handles)
- *   C) flistmai+0x8C = RES[5]                  (SETUP -- icon array)
- *   D) RES[1] loop -> flistmai+0x90..+0xA0     (SETUP -- windowps handles)
- *   E) RES[1][75] -> flistmai+0x34, +0x64      (SETUP -- text colors)
- *   F) misc layout writes                      (SETUP)
- *   G) populate_friend_data                    (POPULATE)
- *   H) FUN_0476E1E0("menu friend", ...)        (SKIP -- visual open)
- *   I) FUN_0476E1E0("menu titlehan", ...)      (SKIP -- visual open) */
-static bool flistmai_setup_resources(uint8_t* fm, uint8_t mode_byte)
-{
-    uint32_t* res_table = (uint32_t*)(s_ffxiBase + OFF_RES_TABLE);
-    uint32_t res2 = res_table[2];   /* menu/keytops3 */
-    uint32_t res5 = res_table[5];   /* menu/contents */
-    uint32_t res1 = res_table[1];   /* menu/windowps */
-    if (res1 == 0 || res2 == 0 || res5 == 0)
-    {
-        static bool s_logged = false;
-        if (!s_logged)
-        {
-            xiloader::console::output(xiloader::color::warning,
-                "FlistmaiSetup: resource table not yet populated "
-                "(RES[1]=%08X RES[2]=%08X RES[5]=%08X) -- suppressing further",
-                res1, res2, res5);
-            s_logged = true;
-        }
-        return false;
-    }
 
-    uint32_t* tbl1 = *(uint32_t**)(uintptr_t)res1;
-    uint32_t* tbl2 = *(uint32_t**)(uintptr_t)res2;
-    if (tbl1 == nullptr || tbl2 == nullptr)
-    {
-        xiloader::console::output(xiloader::color::warning,
-            "FlistmaiSetup: resource handle tables NULL (tbl1=%p tbl2=%p)",
-            tbl1, tbl2);
-        return false;
-    }
-
-    /* B) Loop 1: 9 dwords from RES[2]->table -> flistmai+0x68..+0x88 */
-    const uint16_t* idx9 = (const uint16_t*)(s_ffxiBase + OFF_KEYTOPS_IDX_9);
-    uint32_t* dst = (uint32_t*)(fm + 0x68);
-    for (int i = 0; i < 9; i++)
-        dst[i] = tbl2[idx9[i]];
-
-    /* C) flistmai+0x8C = RES[5] (icon array provider) */
-    *(uint32_t*)(fm + 0x8C) = res5;
-
-    /* D) Loop 2: 5 dwords from RES[1]->table -> flistmai+0x90..+0xA0 */
-    const uint16_t* idx5 = (const uint16_t*)(s_ffxiBase + OFF_WINDOWPS_IDX_5);
-    dst = (uint32_t*)(fm + 0x90);
-    for (int i = 0; i < 5; i++)
-        dst[i] = tbl1[idx5[i]];
-
-    /* E) flistmai+0x64 (default text color) and +0x34 (current text color)
-     *    = RES[1]->table[75] (= 0x12C bytes in) */
-    uint32_t text_color = tbl1[75];
-    *(uint32_t*)(fm + 0x64) = text_color;
-    *(uint32_t*)(fm + 0x34) = text_color;
-
-    /* F) Layout / state fields */
-    fm[0x49] = 1;
-    *(uint16_t*)(fm + 0x16) = 6;
-    *(uint16_t*)(fm + 0x26) = 0x10;
-    fm[0x2C] = 4;
-    fm[0x2D] = 3;
-    *(const uint16_t**)(fm + 0x30) =
-        (const uint16_t*)(s_ffxiBase + OFF_COL_OFFSETS);
-    *(int8_t*)(fm + 0x58) = (int8_t)mode_byte;
-
-    /* FUN_04806230(0xf): scroll_top=0xF, page_size=clamp(total-0xF, 0).
-     * Inlined to avoid a stale callee offset. */
-    int16_t total = *(int16_t*)(fm + 0x20);
-    int16_t page  = total - 0x0F;
-    if (page < 0) page = 0;
-    *(int16_t*)(fm + 0x18) = 0x0F;
-    *(int16_t*)(fm + 0x22) = page;
-
-    return true;
-}
-
-/* Setup-only flistmai initializer. Once-per-session; idempotent on retry.
- * Returns true if flistmai is fully initialized (resources + populate). */
-static bool flistmai_init_for_befriend()
-{
-    static bool s_done = false;
-    if (s_done) return true;
-
-    uint32_t flistmai = *(uint32_t*)(s_ffxiBase + OFF_FLISTMAI_PTR);
-    if (flistmai == 0)
-    {
-        xiloader::console::output(xiloader::color::warning,
-            "FlistmaiSetup: flistmai pointer NULL -- engine init incomplete");
-        return false;
-    }
-
-    uint8_t* fm = (uint8_t*)(uintptr_t)flistmai;
-    const uint8_t mode_byte = 0;
-
-    if (!flistmai_setup_resources(fm, mode_byte))
-        return false;
-
-    typedef void (__thiscall* FnPopulate)(void* flistmai, uint32_t openByte);
-    auto populate = (FnPopulate)(s_ffxiBase + OFF_POPULATE_FN);
-
-    __try {
-        populate((void*)(uintptr_t)flistmai, mode_byte);
-    } __except (EXCEPTION_EXECUTE_HANDLER) {
-        xiloader::console::output(xiloader::color::error,
-            "FlistmaiSetup: populate raised exception, will not retry");
-        s_done = true;
-        return false;
-    }
-
-    uint32_t slot_count = *(uint32_t*)((uintptr_t)flistmai + 0x50);
-    uint32_t render_arr = *(uint32_t*)((uintptr_t)flistmai + 0x5C);
-    uint32_t display_arr = *(uint32_t*)((uintptr_t)flistmai + 0x60);
-    s_done = true;
-    return true;
-}
 
 static int do_array_sync()
 {
@@ -3139,7 +3065,6 @@ static void write_notification_files()
     }
 }
 
-static constexpr uint32_t OFF_MSG_VTABLE = 0x33AC28;  /* set by constructor at +0x2006E0 */
 
 static bool s_msg_insert_failed = false;
 
@@ -4554,7 +4479,6 @@ void friend_system::on_tick()
             {
                 s_ffxi_offsets_logged = true;
                 struct { const char* name; uint32_t off; } ptrs[] = {
-                    {"chat_obj",      0x62FF90},
                     {"msg_obj",       OFF_MSG_OBJ_NATIVE},
                     {"event_handler", 0x62FF9C},
                     {"flistmai",      OFF_FLISTMAI_PTR},
@@ -4618,7 +4542,6 @@ void friend_system::on_tick()
                  * bails on a precondition before that happens. We replicate
                  * the SETUP-only portion of native flistmai_menu_open so
                  * /befriend has a fully drawable flistmai to act on. */
-                flistmai_init_for_befriend();
 
                 s_pump_count = 0;
                 s_consecutive_failures = 0;
@@ -4751,14 +4674,6 @@ void friend_system::on_tick()
             /* Bring up the POL push channel (live friend status updates). */
             pump_pol_push();
 
-            /* Apply deferred FFXiMain patches now that we're in steady state. */
-            if (!s_patches_applied)
-            {
-                nop_bytes(s_ffxiBase + OFF_TYPE5_CHECK, 2);
-                nop_bytes(s_ffxiBase + OFF_POP_CHECK1,  2);
-                nop_bytes(s_ffxiBase + OFF_POP_CHECK2,  2);
-                s_patches_applied = true;
-            }
             apply_notification_overlay_patches();
 
             /* Do NOT pre-open the inbox on login. full_init puts the inbox
@@ -4772,81 +4687,6 @@ void friend_system::on_tick()
              * (driven separately by msgrec -> inject_notification) still
              * surfaces new messages on login without it. */
 
-            /* Retry flistmai_init_for_befriend until the engine's menu
-             * resource tables (RES[1]/RES[2]/RES[5]) are populated by
-             * FUN_047E0CF0. Without populate_friend_data on the flistmai
-             * object, FFXi keeps the "Downloading data..." placeholder up
-             * for the entire friend-system UI (Members tab, Messages tab,
-             * S:/R: overlay) until the user opens flist manually. Poll
-             * every ~30 ticks (~0.5s) so the retry is cheap but responsive. */
-            {
-                static int s_flist_retry_ticks = 0;
-                if (++s_flist_retry_ticks >= 30)
-                {
-                    s_flist_retry_ticks = 0;
-                    flistmai_init_for_befriend();
-                }
-            }
-
-            /* HandleMessageClick clears rebuild_flag on each Enter, so a
-             * stale "Leave Unread" set bit unsticks on the next click without
-             * a per-tick clear (which interfered with the rebuild consumer). */
-
-            /* chat_obj at [FFXi+0x62FF90] needs embedded marker/buttonto UI
-             * element definitions for the body display panel. Retail's
-             * constructor populates this template; LSB leaves it zero. */
-            {
-                static bool s_chat_layout_init = false;
-                if (!s_chat_layout_init && s_ffxiBase != nullptr)
-                {
-                    uint32_t chat_ptr = *(uint32_t*)(s_ffxiBase + 0x62FF90);
-                    if (chat_ptr != 0)
-                    {
-                        uint8_t* co = (uint8_t*)(uintptr_t)chat_ptr;
-                        if (*(co + 0x0D) == 0x00)
-                        {
-                            /* Retail chat_obj template, +0x0C..+0x1FF (500B):
-                             * 6 marker + 2 buttonto + end marker. */
-                            static const uint8_t CHAT_TEMPLATE[] = {
-                                /* +0x0C */ 0x01,0x0A,0xFF,0xFF,
-                                /* +0x10 */ 0x00,0x0A,0x00,0x10,0x00,0x10,0x00,0x10,0x00,0x10,0x00,0x00,0x00,0x00,0x00,0x00,
-                                /* +0x20 */ 0x7F,0x7F,0x7F,0x7F,0x7F,0x7F,0x7F,0x7F,0x7F,0x7F,0x7F,0x7F,0x01,0x00,0x01,0x01,
-                                /* +0x30 */ 0x6D,0x65,0x6E,0x75,0x20,0x20,0x20,0x20,0x6D,0x61,0x72,0x6B,0x65,0x72,0x20,0x20, /* "menu    marker  " */
-                                /* +0x40 */ 0x00,0x00,0x00,0x00,0x20,0x00,0x00,0x00,0x00,0x00,0x0F,0x00,0x20,0x00,0x0F,0x00,
-                                /* +0x50 */ 0x20,0x00,0x0F,0x00,0x00,0x00,0x30,0x00,0x00,0x60,0x60,0x7F,0x70,0x60,0x60,0x7F,
-                                /* +0x60 */ 0x70,0x60,0x60,0x7F,0x70,0x60,0x60,0x7F,0x70,0x01,0x00,0x02,0x01,0x6D,0x65,0x6E,
-                                /* +0x70 */ 0x75,0x20,0x20,0x20,0x20,0x62,0x75,0x74,0x74,0x6F,0x6E,0x74,0x6F,0x06,0x07,0x00, /* "menu    buttonto" */
-                                /* +0x80 */ 0x05,0x00,0x0D,0x00,0x05,0x00,0x07,0x00,0x0B,0x00,0x0D,0x00,0x0B,0x00,0x10,0x00,
-                                /* +0x90 */ 0x10,0x00,0x10,0x00,0x10,0x00,0x00,0x7F,0x7F,0x7F,0x7F,0x7F,0x7F,0x7F,0x7F,0x7F,
-                                /* +0xA0 */ 0x7F,0x7F,0x7F,0x7F,0x7F,0x7F,0x7F,0x01,0x00,0x01,0x01,0x6D,0x65,0x6E,0x75,0x20, /* "menu " */
-                                /* +0xB0 */ 0x20,0x20,0x20,0x6D,0x61,0x72,0x6B,0x65,0x72,0x20,0x20,0x0D,0x00,0xFF,0xFF,0x13, /* "   marker  " */
-                                /* +0xC0 */ 0x00,0xFF,0xFF,0x0D,0x00,0x05,0x00,0x13,0x00,0x05,0x00,0x10,0x00,0x10,0x00,0x10,
-                                /* +0xD0 */ 0x00,0x10,0x00,0x00,0x7F,0x7F,0x7F,0x7F,0x7F,0x7F,0x7F,0x7F,0x7F,0x7F,0x7F,0x7F,
-                                /* +0xE0 */ 0x7F,0x7F,0x7F,0x7F,0x01,0x00,0x01,0x01,0x6D,0x65,0x6E,0x75,0x20,0x20,0x20,0x20, /* "menu    " */
-                                /* +0xF0 */ 0x6D,0x61,0x72,0x6B,0x65,0x72,0x20,0x20,0x0D,0x00,0x05,0x00,0x13,0x00,0x05,0x00, /* "marker  " */
-                                /* +0x100 */ 0x0D,0x00,0x0B,0x00,0x13,0x00,0x0B,0x00,0x10,0x00,0x10,0x00,0x10,0x00,0x10,0x00,
-                                /* +0x110 */ 0x00,0x7F,0x7F,0x7F,0x7F,0x7F,0x7F,0x7F,0x7F,0x7F,0x7F,0x7F,0x7F,0x7F,0x7F,0x7F,
-                                /* +0x120 */ 0x7F,0x01,0x00,0x01,0x01,0x6D,0x65,0x6E,0x75,0x20,0x20,0x20,0x20,0x6D,0x61,0x72, /* "menu    mar" */
-                                /* +0x130 */ 0x6B,0x65,0x72,0x20,0x20,0x0D,0x00,0x0B,0x00,0x13,0x00,0x0B,0x00,0x0D,0x00,0x11, /* "ker  " */
-                                /* +0x140 */ 0x00,0x13,0x00,0x11,0x00,0x10,0x00,0x10,0x00,0x10,0x00,0x10,0x00,0x00,0x7F,0x7F,
-                                /* +0x150 */ 0x7F,0x7F,0x7F,0x7F,0x7F,0x7F,0x7F,0x7F,0x7F,0x7F,0x7F,0x7F,0x7F,0x7F,0x01,0x00,
-                                /* +0x160 */ 0x01,0x01,0x6D,0x65,0x6E,0x75,0x20,0x20,0x20,0x20,0x6D,0x61,0x72,0x6B,0x65,0x72, /* "menu    marker" */
-                                /* +0x170 */ 0x20,0x20,0x13,0x00,0x05,0x00,0x19,0x00,0x05,0x00,0x13,0x00,0x0B,0x00,0x19,0x00, /* "  " */
-                                /* +0x180 */ 0x0B,0x00,0x10,0x00,0x10,0x00,0x10,0x00,0x10,0x00,0x00,0x7F,0x7F,0x7F,0x7F,0x7F,
-                                /* +0x190 */ 0x7F,0x7F,0x7F,0x7F,0x7F,0x7F,0x7F,0x7F,0x7F,0x7F,0x7F,0x01,0x00,0x01,0x01,0x6D, /* "m" */
-                                /* +0x1A0 */ 0x65,0x6E,0x75,0x20,0x20,0x20,0x20,0x6D,0x61,0x72,0x6B,0x65,0x72,0x20,0x20,0x00, /* "enu    marker  " */
-                                /* +0x1B0 */ 0x00,0x00,0x00,0x20,0x00,0x00,0x00,0x00,0x00,0x0F,0x00,0x20,0x00,0x0F,0x00,0x20,
-                                /* +0x1C0 */ 0x00,0x0F,0x00,0x00,0x00,0x30,0x00,0x00,0x60,0x60,0x7F,0x70,0x60,0x60,0x7F,0x70,
-                                /* +0x1D0 */ 0x60,0x60,0x7F,0x70,0x60,0x60,0x7F,0x70,0x01,0x00,0x02,0x01,0x6D,0x65,0x6E,0x75,
-                                /* +0x1E0 */ 0x20,0x20,0x20,0x20,0x62,0x75,0x74,0x74,0x6F,0x6E,0x74,0x6F,0x00,0x00,0x00,0x00, /* "    buttonto" */
-                                /* +0x1F0 */ 0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x65,0x6E,0x64,0x00,                      /* "end" */
-                            };
-                            memcpy(co + 0x0C, CHAT_TEMPLATE, sizeof(CHAT_TEMPLATE));
-                        }
-                        s_chat_layout_init = true;
-                    }
-                }
-            }
 
             gate_keeper();
 

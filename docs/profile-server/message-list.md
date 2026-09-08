@@ -91,8 +91,8 @@ Dedicated init/driver pair separate from CallerA/B/C.
 
 | Global | Purpose |
 |--------|---------|
-| `[FFXi+0x62FF94]` | Messages table (vtable +0x339C28) |
-| `[FFXi+0x62FF90]` | Chat message display (vtable +0x339BE0) |
+| `[FFXi+0x630F9C]` | Messages table (vtable +0x339C28) |
+| `[FFXi+0x630F98]` | Chat message display (vtable +0x339BE0) |
 | `[FFXi+0x62EE1C]` | Unused (zero xrefs in .text) |
 
 ### msg_obj fields
@@ -135,8 +135,8 @@ Jump table at FFXi+0x1EB642 -- four handlers dispatched by the listener at `[FFX
 | Entry | Address | Action |
 |-------|---------|--------|
 | 0 | FFXi+0x1EB53E | Body display: format + vtable[9] call |
-| 1 | FFXi+0x1EB5B0 | `chat_insert` on `[FFXi+0x62FF90]` (opens input) |
-| 2 | FFXi+0x1EB5EB | `full_init` on `[FFXi+0x62FF94]` + create task |
+| 1 | FFXi+0x1EB5B0 | `chat_insert` on `[FFXi+0x630F98]` (opens input) |
+| 2 | FFXi+0x1EB5EB | `full_init` on `[FFXi+0x630F9C]` + create task |
 | 3 | FFXi+0x1EB61D | Event handler |
 
 ### Handler 0: Body Display (FFXi+0x1EB53E)
@@ -149,13 +149,13 @@ Native click-to-read path:
 4. Call `vtable[9]` (offset 0x24) with `__thiscall(display_obj, formatted_text)`.
 5. Show "flmes" element via wm function at FFXi+0x15E7A0.
 
-The display controller at `[FFXi+0x62F218]` is a POL text output object (vtable at FFXi+0x2F6A98). It is NOT the chat_obj at `[FFXi+0x62FF90]`.
+The display controller at `[FFXi+0x62F218]` is a POL text output object (vtable at FFXi+0x2F6A98). It is NOT the chat_obj at `[FFXi+0x630F98]`.
 
 ### Handler 1: chat_insert (FFXi+0x1EB5B0)
 
 Opens the POL chat input field ("msgline" element). Not for displaying body text.
 
-1. Check rebuild flag at `[FFXi+0x62FFA0]` -- if set, early return.
+1. Check rebuild flag at `[FFXi+0x630FA8]` -- if set, early return.
 2. Store `arg1->chat_obj+0x1D0`, `arg2->+0x1D4`, `arg3->+0x1D8`.
 3. Set `chat_obj+0x14` (inner_switch) = 1.
 4. Call `show_menu("menu    msgline ", vis=1, 0)` on wm at FFXi+0x5EDD10.
@@ -163,7 +163,7 @@ Opens the POL chat input field ("msgline" element). Not for displaying body text
 
 ### Handler 2: full_init (FFXi+0x1EB5EB)
 
-Calls `full_init` on msg_obj `[FFXi+0x62FF94]`. Creates the file-scanning task.
+Calls `full_init` on msg_obj `[FFXi+0x630F9C]`. Creates the file-scanning task.
 
 ## UI Element Names (8-byte padded, parent+child compound)
 

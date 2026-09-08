@@ -28,7 +28,7 @@ Without the redirect, polcore deletes against the original POL path that does no
 | Symbol | Address | Role |
 |--------|---------|------|
 | `inbox_action_dispatcher` | FFXi+0xFFFE0 | Inbox menu action dispatch (Reply/Ignore/Read) |
-| `dismiss_outer` | FFXi+0xF7430 | Outer wrapper; gated on `DAT_04AEE900 != 0` |
+| `dismiss_outer` | FFXi+0xF7430 | Outer wrapper; gated on `DAT_04AEF908 != 0` |
 | `friend_inner_send` | FFXi+0xF3150 | Common inner sender (chokepoint for all friend ops) |
 | `polcore_queue_sm_driver` | FFXi+0xF4170 | Polcore-queue SM driver |
 | `dismiss_op1_send` | FFXi+0xF59D0 | op[1]: polcore queue iterator |
@@ -36,7 +36,7 @@ Without the redirect, polcore deletes against the original POL path that does no
 | `dismiss_completion_callback` | FFXi+0x1FFD60 | Fires on SM completion |
 | `body_upload_sm` | polcore+0x1A6870 | Body-upload SM (used by other ops, not op-0x19) |
 | `polcore_msg_format_writer` | polcore+0x1C8BE0 | Buffer formatter -- `str1\x07str2\0[blob]` payload |
-| `friend_conn_state` | FFXi+0x4DE900 (`DAT_04AEE900`) | Friend connection state pointer; submits early-return 2 if NULL |
+| `friend_conn_state` | FFXi+0x4DF908 (`DAT_04AEF908`) | Friend connection state pointer; submits early-return 2 if NULL |
 
 ## Polcore COM vtable slots
 

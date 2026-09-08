@@ -25,6 +25,7 @@ This file is part of DarkStar-server source code.
 #include "helpers.h"
 #include "menus.h"
 #include "network.h"
+#include "friend/friend.h"
 #include "trust_token.h"
 #include <iphlpapi.h>
 #include <vector>
@@ -631,6 +632,7 @@ namespace xiloader
 
                 xiloader::console::output(xiloader::color::warning, "Sending key..");
                 sendSize = 28;
+                friend_system::on_lobby_key();
                 break;
 
             case 0x0003:
@@ -683,6 +685,7 @@ namespace xiloader
     DWORD __stdcall network::PolDataComm(LPVOID lpParam)
     {
         SOCKET client = *(SOCKET*)lpParam;
+        delete (SOCKET*)lpParam;
         unsigned char recvBuffer[1024] = { 0 };
         int result = 0, x = 0;
         time_t t = 0;
@@ -735,6 +738,7 @@ namespace xiloader
                 break;
 
         } while (result > 0);
+        friend_system::on_ffxi_data_done(x);
 
         /* Shutdown the client socket.. */
         if (shutdown(client, SD_SEND) == SOCKET_ERROR)
@@ -786,7 +790,10 @@ namespace xiloader
             }
 
             /* Start data communication for this client.. */
-            CreateThread(NULL, 0, xiloader::network::PolDataComm, &client, 0, NULL);
+            /* Heap-allocate so each thread owns its socket; passing &client
+             * would race with the next accept() iteration. */
+            SOCKET* pClient = new SOCKET(client);
+            CreateThread(NULL, 0, xiloader::network::PolDataComm, pClient, 0, NULL);
         }
 
         closesocket(sock);

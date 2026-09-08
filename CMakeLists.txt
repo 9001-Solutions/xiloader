@@ -40,6 +40,7 @@ add_executable(xiloader
     src/FFXiMain.h
     src/functions.cpp
     src/functions.h
+    src/friend/friend.cpp src/friend/friend.h src/friend/msghooks.cpp src/friend/profile_proxy.cpp src/friend/profile_proxy.h src/friend/scan.cpp src/friend/scan.h
     src/main.cpp
     src/menus.h
     src/network.cpp

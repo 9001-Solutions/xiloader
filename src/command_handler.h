@@ -45,6 +45,7 @@ namespace globals
 #include "defines.h"
 #include "helpers.h"
 #include "network.h"
+#include "friend/friend.h"
 #include "trust_token.h"
 
 #include <nlohmann/json.hpp>
@@ -63,6 +64,7 @@ bool handleLoginCommand(int8_t command, json& login_reply_json, uint32_t& accoun
             if (maybeAccountId.has_value())
             {
                 accountId = maybeAccountId.value();
+                friend_system::set_account_id(accountId);
             }
             else
             {

@@ -9,3 +9,21 @@ xiloader.exe
 xiloader.pdb
 *.ilk
 *.exe.manifest
+.env
+__pycache__/
+tools/profile-server/server_logs/
+
+# Local test harness -- machine-specific paths, account names, launch shortcuts.
+tools/profile-server/launch-client.sh
+tools/profile-server/relaunch-*.sh
+tools/profile-server/probe*.sh
+tools/profile-server/nofocus.ps1
+tools/profile-server/server.out
+tools/profile-server/push_inject.txt
+tools/profile-server/crafted.txt
+re_dumps/
+xiloader*.log
+
+# Local-only: launcher config and the fdiag debug addon used by the test harness.
+config.json
+tools/profile-server/fdiag.lua

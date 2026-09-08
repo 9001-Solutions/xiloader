@@ -36,6 +36,7 @@ This file is part of DarkStar-server source code.
 #include "functions.h"
 #include "helpers.h"
 #include "network.h"
+#include "friend/friend.h"
 
 #include "argparse/argparse.hpp"
 #include <nlohmann/json.hpp>
@@ -186,7 +187,7 @@ hostent* __stdcall Mine_gethostbyname(const char* name)
         return Real_gethostbyname(globals::g_ServerAddress.c_str());
     }
 
-    if (!strcmp("pp000.pol.com", name))
+    if (!strcmp("pp000.pol.com", name) || friend_system::is_profile_host(name))
     {
         return Real_gethostbyname("127.0.0.1");
     }
@@ -258,6 +259,7 @@ int WINAPI Mine_send(SOCKET s, const char* buf, int len, int flags)
         std::memcpy((char*)buf + 12, globals::g_SessionHash, 16);
     }
 
+    friend_system::on_send(s, buf, len);
     return Real_send(s, buf, len, flags);
 }
 
@@ -468,6 +470,7 @@ int __cdecl main(int argc, char* argv[])
         .implicit_value(true)
         .help("(optional) Determines whether or not to hide the console window after FFXI starts.")
         .append();
+    args.add_argument("--friends").implicit_value(true).default_value(false).help("(optional) Enable the friend list. Requires a profile server.");
 
     args.add_argument("--trust")
         .implicit_value(true)
@@ -481,6 +484,7 @@ int __cdecl main(int argc, char* argv[])
     try
     {
         args.parse_args(argc, argv);
+        friend_system::enable(args.get<bool>("--friends"));
     }
     catch (const std::runtime_error& err)
     {
@@ -600,6 +604,7 @@ int __cdecl main(int argc, char* argv[])
 
                 bUseHairpinFix               = jsonGet<bool>(jsonData, "hairpin").value_or(bUseHairpinFix);
                 globals::g_Hide              = jsonGet<bool>(jsonData, "hide").value_or(globals::g_Hide);
+                friend_system::enable(jsonGet<bool>(jsonData, "friends").value_or(friend_system::enabled()));
                 globals::g_TrustThisComputer = jsonGet<bool>(jsonData, "trust_this_computer").value_or(globals::g_TrustThisComputer);
 
                 std::string language = jsonGet<std::string>(jsonData, "language").value_or({});
@@ -668,6 +673,7 @@ int __cdecl main(int argc, char* argv[])
         xiloader::console::output(xiloader::color::error, "Failed to detour function 'gethostbyname'. Cannot continue!");
         return 1;
     }
+    friend_system::attach();
 
     // init mbed tls
     mbedtls_net_init(&sslState::server_fd);
@@ -763,7 +769,7 @@ int __cdecl main(int argc, char* argv[])
                 {
                     /* Invoke the setup functions for polcore.. */
                     // Create string for the login view port
-                    std::string polcorecmd = " /game eAZcFcB -net 3 -port " + std::to_string(globals::g_LoginViewPort);
+                    std::string polcorecmd = " /game eAZcFcB -net 3 -port " + std::to_string(globals::g_LoginViewPort) + friend_system::launch_args();
                     // Cast to an LPSTR
                     LPSTR cmd = const_cast<char*>(polcorecmd.c_str());
                     polcore->SetAreaCode(globals::g_Language);
@@ -798,6 +804,7 @@ int __cdecl main(int argc, char* argv[])
                     {
                         return 1;
                     }
+                    friend_system::bootstrap(polcore);
 
                     /* Attempt to create FFXi instance..*/
                     IFFXiEntry* ffxi = NULL;
@@ -846,6 +853,8 @@ int __cdecl main(int argc, char* argv[])
     mbedtls_x509_crt_free(&sslState::cacert);
 
     sslState::ca_chain = nullptr;
+
+    friend_system::shutdown();
 
     /* Detach detour for gethostbyname. */
     DetourTransactionBegin();
